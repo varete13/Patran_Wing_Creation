@@ -401,6 +401,152 @@ class Wing:
         n_sp = int((budget / coeff + 1) / 2)
         return max(n_sp, min_skin_points)
 
+    @staticmethod
+    def section_map_plot(
+        airfoil: NACAAirfoil,
+        spar_positions: list[float],
+        stringer_positions,
+        n_skin_points: int = 100,
+        point_spacing: Literal["uniform", "cosine"] = "cosine",
+        ax=None,
+    ):
+        """Plot the airfoil profile with section colour-coding and local index labels.
+
+        Builds a flat reference rib (chord=1, no twist/sweep/dihedral) and
+        shows which local profile indices belong to each standard section
+        (LE, Box, TE).  Use this to choose ``inner_cuts`` index pairs without
+        having to build a full :class:`Wing`.
+
+        Parameters
+        ----------
+        airfoil : NACAAirfoil
+        spar_positions : list[float]
+            Chordwise spar locations (0–1).
+        stringer_positions : array-like
+            Chordwise stringer locations (0–1).
+        n_skin_points : int
+            Points per surface side (default 100).
+        point_spacing : "uniform" or "cosine"
+        ax : matplotlib Axes or None
+            If *None* a new figure is created and returned.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+
+        # Build a flat reference rib (chord=1, no twist/offset/elevation)
+        _id_mgr = IDManager(1, n_skin_points, len(spar_positions))
+        _rib_ids = _id_mgr.allocate_rib()
+        rib = Rib(
+            span_position=0.0,
+            airfoil=airfoil,
+            chord=1.0,
+            offset=0.0,
+            twist=0.0,
+            elevation=0.0,
+            spar_positions=spar_positions,
+            stringer_positions=np.asarray(stringer_positions),
+            ids=_rib_ids,
+            n_skin_points=n_skin_points,
+            point_spacing=point_spacing,
+        )
+
+        px, py = rib.profile
+        if np.allclose(px[0], px[-1]) and np.allclose(py[0], py[-1]):
+            px, py = px[:-1], py[:-1]
+        n = len(px)
+
+        # Section boundary indices (mirrors _apply_cuts logic)
+        n_spars = len(spar_positions)
+        ps = rib.ids.point_start
+        upper_idx = [sid - ps for sid in rib.spar_ids[:n_spars]]
+        lower_idx = [sid - ps for sid in rib.spar_ids[n_spars:]]
+
+        le_idx = list(range(0, upper_idx[0] + 1)) + list(range(lower_idx[-1], n))
+        box_idx = [
+            list(range(upper_idx[j], upper_idx[j + 1] + 1))
+            + list(range(lower_idx[n_spars - 2 - j], lower_idx[n_spars - 1 - j] + 1))
+            for j in range(n_spars - 1)
+        ]
+        te_idx = list(range(upper_idx[-1], lower_idx[0] + 1))
+
+        if n_spars == 1:
+            sec_names = ["LE", "TE"]
+            sec_indices = [le_idx, te_idx]
+        elif n_spars == 2:
+            sec_names = ["LE", "Box", "TE"]
+            sec_indices = [le_idx, box_idx[0], te_idx]
+        else:
+            sec_names = ["LE"] + [f"Box{k + 1}" for k in range(n_spars - 1)] + ["TE"]
+            sec_indices = [le_idx] + box_idx + [te_idx]
+
+        sec_colors = ["#2196F3", "#4CAF50", "#FF5722", "#9C27B0", "#FF9800"]
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(14, 5))
+        else:
+            fig = ax.figure
+
+        # Thin profile outline
+        ax.plot(
+            np.append(px, px[0]), np.append(py, py[0]),
+            color="lightgray", lw=0.8, zorder=1,
+        )
+
+        # Scatter and annotate each section
+        for sec_name, idx_list, color in zip(sec_names, sec_indices, sec_colors):
+            xs = px[np.array(idx_list)]
+            ys = py[np.array(idx_list)]
+            ax.scatter(xs, ys, color=color, s=25, zorder=3)
+            for i in idx_list:
+                ax.annotate(
+                    str(i), (px[i], py[i]),
+                    fontsize=6, color=color,
+                    ha="center", va="bottom",
+                    xytext=(0, 4), textcoords="offset points",
+                )
+
+        # Spar vertical reference lines
+        for sp_x in spar_positions:
+            ax.axvline(sp_x, color="dimgray", ls="--", lw=0.8, alpha=0.6)
+
+        # Stringer vertical reference lines
+        str_arr = np.asarray(stringer_positions)
+        if str_arr.size:
+            for st_x in str_arr:
+                ax.axvline(st_x, color="darkorange", ls=":", lw=0.8, alpha=0.6)
+
+        # Legend
+        legend_handles = [
+            Line2D(
+                [0], [0], marker="o", color="w",
+                markerfacecolor=c, markersize=7, label=name,
+            )
+            for name, c in zip(sec_names, sec_colors)
+        ]
+        legend_handles.append(
+            Line2D([0], [0], color="dimgray", ls="--", lw=0.8, label="Spar")
+        )
+        if str_arr.size:
+            legend_handles.append(
+                Line2D([0], [0], color="darkorange", ls=":", lw=0.8, label="Stringer")
+            )
+        ax.legend(handles=legend_handles, loc="upper right", fontsize=8)
+
+        designation = getattr(airfoil, "designation", "")
+        ax.set_aspect("equal")
+        ax.set_xlabel("x/c")
+        ax.set_ylabel("y/c")
+        ax.set_title(
+            f"Section map — NACA {designation} | {n_spars} spar(s) | "
+            f"{n_skin_points} pts ({point_spacing})"
+        )
+        ax.grid(True, alpha=0.3)
+        return fig
+
     def summary(self) -> EntitySummary:
         """Count all Nastran/Patran entities that would be generated."""
         n = self.n_ribs

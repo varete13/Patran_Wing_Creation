@@ -286,6 +286,15 @@ def main() -> None:
     plot_rib(wing_cuts_hollow_var.ribs[0], ax16)
     ax16.set_title("Inner cuts + hollow (var. wall) — root")
 
+    # --- Section map: identify local indices for inner_cuts ---
+    Wing.section_map_plot(
+        airfoil=NACAAirfoil("6412"),
+        spar_positions=[0.2, 0.65],
+        stringer_positions=np.linspace(0.05, 0.8, 8),
+        n_skin_points=n_sp,
+        point_spacing="cosine",
+    )
+
     # plt.show()
     # Export
     save_ses(wing_const, "wing_constant_profile.ses.01")
