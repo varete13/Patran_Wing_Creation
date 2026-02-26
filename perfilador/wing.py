@@ -84,10 +84,11 @@ class Wing:
         ``{y_station: naca_code, ...}`` — NACA parameters are linearly
         interpolated between stations so the profile transitions smoothly
         along the span.
-    wall_thickness_distribution : dict[float, list[float]] or None
-        ``{y_station: [t_sec0, t_sec1, ...], ...}`` — per-section wall
-        thicknesses (one value per section, LE→TE), linearly interpolated
-        between stations.  Mutually exclusive with *wall_thickness*.
+    wall_thickness : list[float] or dict[float, list[float]] or None
+        Wall thickness per section (LE → TE).  A ``list`` applies the same
+        thicknesses to every rib; a ``dict`` maps ``y_station`` keys to
+        per-section lists and the values are interpolated along the span.
+        ``None`` → solid ribs (default).
     span : float
         Semi-span in metres.
     n_ribs : int
@@ -123,11 +124,9 @@ class Wing:
         n_skin_points: int = 100,
         point_spacing: Literal["uniform", "cosine"] = "uniform",
         min_point_spacing: float | None = 0.005,
-        wall_thickness: list[float] | None = None,
-        wall_thickness_distribution: dict[float, list[float]] | None = None,
+        wall_thickness: list[float] | dict[float, list[float]] | None = None,
         inner_cuts: list[tuple[int, int]] | dict[int, list[tuple[int, int]]] | None = None,
-        cut_wall_thickness: list[float] | None = None,
-        cut_wall_thickness_distribution: dict[float, list[float]] | None = None,
+        cut_wall_thickness: list[float] | dict[float, list[float]] | None = None,
         wall_thickness_kind: Literal["linear", "quadratic", "cubic", "previous", "next"] = "linear",
         cut_wall_thickness_kind: Literal["linear", "quadratic", "cubic", "previous", "next"] = "linear",
     ) -> None:
@@ -137,14 +136,6 @@ class Wing:
             raise ValueError(
                 "'airfoil' and 'airfoil_distribution' are mutually exclusive"
             )
-        if wall_thickness is not None and wall_thickness_distribution is not None:
-            raise ValueError(
-                "'wall_thickness' and 'wall_thickness_distribution' are mutually exclusive"
-            )
-        if cut_wall_thickness is not None and cut_wall_thickness_distribution is not None:
-            raise ValueError(
-                "'cut_wall_thickness' and 'cut_wall_thickness_distribution' are mutually exclusive"
-            )
 
         self.span = span
         self.n_ribs = n_ribs
@@ -152,42 +143,43 @@ class Wing:
         self.stringer_positions = np.asarray(stringer_positions)
         self.point_spacing = point_spacing
         self.min_point_spacing = min_point_spacing
-        self.wall_thickness = wall_thickness
-        self.cut_wall_thickness = cut_wall_thickness
 
-        # Wall thickness distribution along the span
-        if wall_thickness_distribution is not None:
-            y_stations = sorted(wall_thickness_distribution.keys())
-            thicknesses = [wall_thickness_distribution[y] for y in y_stations]
-            n_sections = len(spar_positions) + 1
+        # Wall thickness: list → constant, dict → interpolated along span
+        n_sections = len(spar_positions) + 1
+        if isinstance(wall_thickness, dict):
+            y_stations = sorted(wall_thickness.keys())
+            thicknesses = [wall_thickness[y] for y in y_stations]
             if any(len(t) != n_sections for t in thicknesses):
                 raise ValueError(
-                    f"Each entry in wall_thickness_distribution must have "
+                    f"Each entry in wall_thickness must have "
                     f"{n_sections} values (one per section)"
                 )
             self._wt_interps = [
                 interp1d(y_stations, [t[i] for t in thicknesses], kind=wall_thickness_kind)
                 for i in range(n_sections)
             ]
+            self.wall_thickness = None
         else:
             self._wt_interps = None
+            self.wall_thickness = wall_thickness
 
-        # Cut wall thickness distribution along the span
-        if cut_wall_thickness_distribution is not None:
-            y_stations = sorted(cut_wall_thickness_distribution.keys())
-            thicknesses = [cut_wall_thickness_distribution[y] for y in y_stations]
-            n_sections = len(spar_positions) + 1
+        # Cut wall thickness: list → constant, dict → interpolated along span
+        if isinstance(cut_wall_thickness, dict):
+            y_stations = sorted(cut_wall_thickness.keys())
+            thicknesses = [cut_wall_thickness[y] for y in y_stations]
             if any(len(t) != n_sections for t in thicknesses):
                 raise ValueError(
-                    f"Each entry in cut_wall_thickness_distribution must have "
+                    f"Each entry in cut_wall_thickness must have "
                     f"{n_sections} values (one per section)"
                 )
             self._cwt_interps = [
                 interp1d(y_stations, [t[i] for t in thicknesses], kind=cut_wall_thickness_kind)
                 for i in range(n_sections)
             ]
+            self.cut_wall_thickness = None
         else:
             self._cwt_interps = None
+            self.cut_wall_thickness = cut_wall_thickness
 
         # Airfoil distribution along the span
         if airfoil is not None:
@@ -224,9 +216,7 @@ class Wing:
         # ID allocation (uses effective n_skin_points after filtering)
         has_inner = (
             wall_thickness is not None
-            or wall_thickness_distribution is not None
             or cut_wall_thickness is not None
-            or cut_wall_thickness_distribution is not None
         )
         # Normalise inner_cuts to a per-rib dict of local index pairs
         if isinstance(inner_cuts, list):
@@ -307,8 +297,8 @@ class Wing:
     def wall_thickness_at(self, y: float) -> list[float] | None:
         """Return the wall thickness per section at spanwise station *y*.
 
-        Returns ``None`` for solid ribs, a constant list if *wall_thickness*
-        was provided, or an interpolated list if *wall_thickness_distribution*
+        Returns ``None`` for solid ribs, a constant list if a ``list`` was
+        provided for *wall_thickness*, or an interpolated list if a ``dict``
         was provided.
         """
         if self._wt_interps is not None:
@@ -318,9 +308,9 @@ class Wing:
     def cut_wall_thickness_at(self, y: float) -> list[float] | None:
         """Return the cut wall thickness per section at spanwise station *y*.
 
-        Returns ``None`` for solid cut sections, a constant list if
-        *cut_wall_thickness* was provided, or an interpolated list if
-        *cut_wall_thickness_distribution* was provided.
+        Returns ``None`` for solid cut sections, a constant list if a ``list``
+        was provided for *cut_wall_thickness*, or an interpolated list if a
+        ``dict`` was provided.
         """
         if self._cwt_interps is not None:
             return [float(interp(y)) for interp in self._cwt_interps]

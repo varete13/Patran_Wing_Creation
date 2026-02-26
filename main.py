@@ -157,7 +157,7 @@ def main() -> None:
         elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
         point_spacing="cosine",
         n_skin_points=n_sp,
-        wall_thickness_distribution={
+        wall_thickness={
             0:    [0.10, 0.12, 0.08],   # root:  LE, spar box, TE
             span: [0.05, 0.05, 0.05],   # tip:   LE, spar box, TE
         },
@@ -191,7 +191,7 @@ def main() -> None:
         elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
         point_spacing="cosine",
         n_skin_points=n_sp,
-        wall_thickness_distribution={
+        wall_thickness={
             0:        [0.20, 0.15, 0.1],   # root:  LE, spar box, TE
             span / 2: [0.10, 0.08, 0.05],   # mid
             span:     [0.05, 0.05, 0.05],   # tip
@@ -272,7 +272,7 @@ def main() -> None:
         n_skin_points=n_sp,
         point_spacing="cosine",
         inner_cuts=[(2, 43)],
-        cut_wall_thickness_distribution={
+        cut_wall_thickness={
             0:    [0.18, 0.15, 0.12],   # root:  LE, Box, TE
             span: [0.08, 0.06, 0.05],   # tip:   LE, Box, TE
         },
