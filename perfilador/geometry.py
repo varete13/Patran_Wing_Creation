@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import warnings
+import logging
 
 import numpy as np
 from shapely.geometry import Polygon
@@ -251,21 +251,19 @@ def hollow_rib_sections(
     for section, thickness in zip(sections, wall_thickness):
         min_dim = _min_dimension(section)
         if min_dim < thickness:
-            warnings.warn(
-                f"Section minimum dimension ({min_dim:.4f}m) is smaller "
-                f"than wall thickness ({thickness:.4f}m) at y="
-                f"{rib.span_position:.2f}m. Section remains solid.",
-                stacklevel=2,
+            logging.debug(
+                "Section minimum dimension (%.4fm) is smaller than wall "
+                "thickness (%.4fm) at y=%.2fm. Section remains solid.",
+                min_dim, thickness, rib.span_position,
             )
             inner_profiles.append(None)
         else:
             inner = offset_polygon(section, thickness)
             if inner is None:
-                warnings.warn(
-                    f"Morphological offset collapsed section (too thin for "
-                    f"{thickness:.4f}m wall) at y={rib.span_position:.2f}m. "
-                    f"Section remains solid.",
-                    stacklevel=2,
+                logging.debug(
+                    "Morphological offset collapsed section (too thin for "
+                    "%.4fm wall) at y=%.2fm. Section remains solid.",
+                    thickness, rib.span_position,
                 )
                 inner_profiles.append(None)
             else:

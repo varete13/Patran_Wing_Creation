@@ -53,19 +53,22 @@ class IDManager:
         n_skin_points: int,
         n_spars: int,
         has_inner: bool = False,
+        n_cuts_per_rib: int = 0,
         scheme: IDScheme | None = None,
     ) -> None:
         self.scheme = scheme or IDScheme()
         self.n_skin_points = n_skin_points
         self.has_inner = has_inner
-        self._validate_and_adjust(n_ribs, n_skin_points, n_spars)
+        self._validate_and_adjust(n_ribs, n_skin_points, n_spars, n_cuts_per_rib)
         self._rib_counter = 0
 
     def _validate_and_adjust(
-        self, n_ribs: int, n_skin_points: int, n_spars: int
+        self, n_ribs: int, n_skin_points: int, n_spars: int, n_cuts_per_rib: int = 0
     ) -> None:
         """Iterative replacement for the recursive ``check_name_basis``."""
         s = self.scheme
+        # Maximum surfaces per rib: standard sections + one extra per cut
+        max_surfaces_per_rib = n_spars + 1 + n_cuts_per_rib
         changed = True
         while changed:
             changed = False
@@ -75,7 +78,7 @@ class IDManager:
             if s.point_base < s.point_stride * n_ribs:
                 s.point_base *= 10
                 changed = True
-            if s.surface_rib_stride < n_spars + 1:
+            if s.surface_rib_stride < max_surfaces_per_rib:
                 s.surface_rib_stride *= 10
                 changed = True
             if s.surface_rib_base < s.surface_rib_stride * n_ribs:

@@ -90,8 +90,6 @@ def main() -> None:
         elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
         n_skin_points=n_sp,
     )
-    print("\nOptimized skin resolution summary:")
-    print(wing_optimized.summary())
     # --- Cosine point spacing (clusters points near LE and TE) ---
     wing_cosine = Wing(
         airfoil=NACAAirfoil("6412"),
@@ -106,8 +104,6 @@ def main() -> None:
         n_skin_points=n_sp,
         point_spacing="cosine",
     )
-    print("\nCosine spacing summary:")
-    print(wing_cosine.summary())
 
     # Compare uniform vs cosine spacing on the root rib
 
@@ -210,6 +206,86 @@ def main() -> None:
     plot_rib(wing_combined.ribs[-1], ax12)
     ax12.set_title("Combined — tip (2409, t=0.04/0.05/0.03 m)")
 
+    # --- Inner cuts: subdivide LE section of every rib ---
+    # Local profile indices (0-based): 2 = upper LE, 43 = lower LE (~1/3 arc
+    # from the front spar on each surface for n_sp≈25 cosine spacing).
+    # Using a list applies the same cut to ALL ribs in one step.
+    wing_cuts = Wing(
+        airfoil=NACAAirfoil("6412"),
+        span=span,
+        n_ribs=10,
+        spar_positions=[0.2, 0.65],
+        stringer_positions=np.linspace(0.05, 0.8, 8),
+        chord_distribution=([0, 5.18, span], [9, 7, 2]),
+        offset_distribution=([0, 5.18, span], [0, 2.42, 13.06]),
+        twist_distribution=([0, span], [np.deg2rad(2), -np.deg2rad(4)]),
+        elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
+        n_skin_points=n_sp,
+        point_spacing="cosine",
+        inner_cuts=[(2, 43)],   # global: same cut on every rib
+    )
+
+    print("\nInner cuts — root rib section breakdown:")
+    for sec_name, subsections in wing_cuts.ribs[0].cut_sections.items():
+        for k, sub in enumerate(subsections, 1):
+            nastran_ids = [idx + wing_cuts.ribs[0].ids.point_start for idx in sub]
+            print(f"  {sec_name}-{k}: {len(sub)} pts — IDs {nastran_ids[0]} -- {nastran_ids[-1]}")
+
+    _, (ax13, ax14) = plt.subplots(1, 2, figsize=(14, 5))
+    ax13.set_aspect("equal")
+    ax14.set_aspect("equal")
+    plot_rib(wing_optimized.ribs[0], ax13)
+    ax13.set_title("Sin inner_cuts — root")
+    plot_rib(wing_cuts.ribs[0], ax14)
+    ax14.set_title("Con inner_cuts — LE cortado en 2")
+
+    # --- Inner cuts + hollow sub-sections (constant wall thickness) ---
+    # One wall thickness value per standard section (LE, Box, TE).
+    wing_cuts_hollow = Wing(
+        airfoil=NACAAirfoil("6412"),
+        span=span,
+        n_ribs=10,
+        spar_positions=[0.2, 0.65],
+        stringer_positions=np.linspace(0.05, 0.8, 8),
+        chord_distribution=([0, 5.18, span], [9, 7, 2]),
+        offset_distribution=([0, 5.18, span], [0, 2.42, 13.06]),
+        twist_distribution=([0, span], [np.deg2rad(2), -np.deg2rad(4)]),
+        elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
+        n_skin_points=n_sp,
+        point_spacing="cosine",
+        inner_cuts=[(2, 43)],
+        cut_wall_thickness=[0.15, 0.12, 0.10],  # LE, Box, TE
+    )
+
+    # --- Inner cuts + hollow sub-sections (variable wall thickness) ---
+    # Wall thickness tapers from root to tip per section.
+    wing_cuts_hollow_var = Wing(
+        airfoil=NACAAirfoil("6412"),
+        span=span,
+        n_ribs=10,
+        spar_positions=[0.2, 0.65],
+        stringer_positions=np.linspace(0.05, 0.8, 8),
+        chord_distribution=([0, 5.18, span], [9, 7, 2]),
+        offset_distribution=([0, 5.18, span], [0, 2.42, 13.06]),
+        twist_distribution=([0, span], [np.deg2rad(2), -np.deg2rad(4)]),
+        elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
+        n_skin_points=n_sp,
+        point_spacing="cosine",
+        inner_cuts=[(2, 43)],
+        cut_wall_thickness_distribution={
+            0:    [0.18, 0.15, 0.12],   # root:  LE, Box, TE
+            span: [0.08, 0.06, 0.05],   # tip:   LE, Box, TE
+        },
+    )
+
+    _, (ax15, ax16) = plt.subplots(1, 2, figsize=(14, 5))
+    ax15.set_aspect("equal")
+    ax16.set_aspect("equal")
+    plot_rib(wing_cuts_hollow.ribs[0], ax15)
+    ax15.set_title("Inner cuts + hollow (const. wall) — root")
+    plot_rib(wing_cuts_hollow_var.ribs[0], ax16)
+    ax16.set_title("Inner cuts + hollow (var. wall) — root")
+
     # plt.show()
     # Export
     save_ses(wing_const, "wing_constant_profile.ses.01")
@@ -219,6 +295,9 @@ def main() -> None:
     save_ses(wing_hollow, "wing_hollow_ribs.ses.01")
     save_ses(wing_hollow_var, "wing_hollow_variable_wall.ses.01")
     save_ses(wing_combined, "wing_combined.ses.01")
+    save_ses(wing_cuts, "wing_inner_cuts.ses.01")
+    save_ses(wing_cuts_hollow, "wing_inner_cuts_hollow.ses.01")
+    save_ses(wing_cuts_hollow_var, "wing_inner_cuts_hollow_var.ses.01")
 
 
 if __name__ == "__main__":
