@@ -326,6 +326,46 @@ logging.basicConfig(level=logging.DEBUG)
 
 ---
 
+## JSON serialisation
+
+Any `Wing` can be saved to a JSON file and reloaded later without touching
+the Python source:
+
+```python
+# Save
+wing.to_json("configs/my_wing.json")
+
+# Load — identical geometry, same Nastran IDs
+wing2 = Wing.from_json("configs/my_wing.json")
+
+# Or work with plain dicts
+d = wing.to_dict()           # JSON-serialisable dict
+wing3 = Wing.from_dict(d)
+```
+
+The JSON file stores every constructor parameter exactly as passed
+(`n_skin_points` is the **requested** value, so `min_point_spacing` filtering
+is re-applied identically on reload).  Numpy arrays are stored as plain lists;
+float-keyed dicts (e.g. `wall_thickness`, `airfoil_distribution`) use string
+keys to comply with JSON.
+
+```json
+{
+  "airfoil": "6412",
+  "span": 35.0,
+  "n_ribs": 10,
+  "spar_positions": [0.2, 0.65],
+  "chord_distribution": {"y": [0, 5.18, 35.0], "values": [9, 7, 2]},
+  "wall_thickness": {"0": [0.10, 0.12, 0.08], "35.0": [0.05, 0.05, 0.05]},
+  "inner_cuts": [[2, 43]],
+  ...
+}
+```
+
+No extra dependencies — uses only Python's standard `json` and `pathlib`.
+
+---
+
 ## Running the examples
 
 ```bash

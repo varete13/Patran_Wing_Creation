@@ -137,6 +137,28 @@ class Wing:
                 "'airfoil' and 'airfoil_distribution' are mutually exclusive"
             )
 
+        # ---- snapshot of original parameters for serialisation ----
+        self._params: dict = {
+            "span": span,
+            "n_ribs": n_ribs,
+            "spar_positions": list(spar_positions),
+            "stringer_positions": np.asarray(stringer_positions).tolist(),
+            "chord_distribution":     (list(chord_distribution[0]),     list(chord_distribution[1])),
+            "offset_distribution":    (list(offset_distribution[0]),    list(offset_distribution[1])),
+            "twist_distribution":     (list(twist_distribution[0]),     list(twist_distribution[1])),
+            "elevation_distribution": (list(elevation_distribution[0]), list(elevation_distribution[1])),
+            "airfoil":              airfoil.designation if airfoil is not None else None,
+            "airfoil_distribution": airfoil_distribution,
+            "n_skin_points":        n_skin_points,
+            "point_spacing":        point_spacing,
+            "min_point_spacing":    min_point_spacing,
+            "wall_thickness":       wall_thickness,
+            "inner_cuts":           inner_cuts,
+            "cut_wall_thickness":   cut_wall_thickness,
+            "wall_thickness_kind":  wall_thickness_kind,
+            "cut_wall_thickness_kind": cut_wall_thickness_kind,
+        }
+
         self.span = span
         self.n_ribs = n_ribs
         self.spar_positions = spar_positions
@@ -293,6 +315,133 @@ class Wing:
             else:
                 kept.append(x_stations[-1])
         return np.array(kept)
+
+    # ------------------------------------------------------------------
+    # JSON serialisation
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """Return a JSON-serialisable dict of the Wing's construction parameters.
+
+        The returned dict can be passed to :meth:`from_dict` or written to
+        disk with :meth:`to_json` to fully reconstruct this wing later.
+        """
+        p = self._params
+
+        def _dist(t: tuple) -> dict:
+            return {"y": list(t[0]), "values": list(t[1])}
+
+        def _str_keys(d: dict | None) -> dict | None:
+            return None if d is None else {str(k): v for k, v in d.items()}
+
+        def _cuts(ic):
+            if ic is None:
+                return None
+            if isinstance(ic, list):
+                return [list(pair) for pair in ic]
+            return {str(k): [list(pair) for pair in pairs]
+                    for k, pairs in ic.items()}
+
+        return {
+            "span":               p["span"],
+            "n_ribs":             p["n_ribs"],
+            "spar_positions":     p["spar_positions"],
+            "stringer_positions": p["stringer_positions"],
+            "chord_distribution":     _dist(p["chord_distribution"]),
+            "offset_distribution":    _dist(p["offset_distribution"]),
+            "twist_distribution":     _dist(p["twist_distribution"]),
+            "elevation_distribution": _dist(p["elevation_distribution"]),
+            "airfoil":              p["airfoil"],
+            "airfoil_distribution": _str_keys(p["airfoil_distribution"]),
+            "n_skin_points":        p["n_skin_points"],
+            "point_spacing":        p["point_spacing"],
+            "min_point_spacing":    p["min_point_spacing"],
+            "wall_thickness":       _str_keys(p["wall_thickness"])
+                                    if isinstance(p["wall_thickness"], dict)
+                                    else p["wall_thickness"],
+            "inner_cuts":           _cuts(p["inner_cuts"]),
+            "cut_wall_thickness":   _str_keys(p["cut_wall_thickness"])
+                                    if isinstance(p["cut_wall_thickness"], dict)
+                                    else p["cut_wall_thickness"],
+            "wall_thickness_kind":     p["wall_thickness_kind"],
+            "cut_wall_thickness_kind": p["cut_wall_thickness_kind"],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Wing":
+        """Create a :class:`Wing` from a dict produced by :meth:`to_dict`.
+
+        Parameters
+        ----------
+        d : dict
+            Dict as returned by :meth:`to_dict` or loaded from a JSON file.
+        """
+        def _tuple(v: dict) -> tuple:
+            return (v["y"], v["values"])
+
+        def _float_keys(v):
+            if v is None:
+                return None
+            if isinstance(v, dict):
+                return {float(k): val for k, val in v.items()}
+            return v  # already a list
+
+        def _cuts(v):
+            if v is None:
+                return None
+            if isinstance(v, list):
+                return [tuple(pair) for pair in v]
+            return {int(k): [tuple(p) for p in pairs]
+                    for k, pairs in v.items()}
+
+        airfoil_code = d.get("airfoil")
+        return cls(
+            span=d["span"],
+            n_ribs=d["n_ribs"],
+            spar_positions=d["spar_positions"],
+            stringer_positions=d["stringer_positions"],
+            chord_distribution=_tuple(d["chord_distribution"]),
+            offset_distribution=_tuple(d["offset_distribution"]),
+            twist_distribution=_tuple(d["twist_distribution"]),
+            elevation_distribution=_tuple(d["elevation_distribution"]),
+            airfoil=NACAAirfoil(airfoil_code) if airfoil_code is not None else None,
+            airfoil_distribution=_float_keys(d.get("airfoil_distribution")),
+            n_skin_points=d.get("n_skin_points", 100),
+            point_spacing=d.get("point_spacing", "uniform"),
+            min_point_spacing=d.get("min_point_spacing", 0.005),
+            wall_thickness=_float_keys(d.get("wall_thickness")),
+            inner_cuts=_cuts(d.get("inner_cuts")),
+            cut_wall_thickness=_float_keys(d.get("cut_wall_thickness")),
+            wall_thickness_kind=d.get("wall_thickness_kind", "linear"),
+            cut_wall_thickness_kind=d.get("cut_wall_thickness_kind", "linear"),
+        )
+
+    def to_json(self, path) -> None:
+        """Serialise the Wing to a JSON file.
+
+        Parameters
+        ----------
+        path : str or Path
+            Destination file.  Created (or overwritten) if it exists.
+        """
+        import json
+        import pathlib
+        with open(pathlib.Path(path), "w", encoding="utf-8") as fh:
+            json.dump(self.to_dict(), fh, indent=2)
+
+    @classmethod
+    def from_json(cls, path) -> "Wing":
+        """Load a :class:`Wing` from a JSON file produced by :meth:`to_json`.
+
+        Parameters
+        ----------
+        path : str or Path
+            Path to the JSON file.
+        """
+        import json
+        import pathlib
+        with open(pathlib.Path(path), encoding="utf-8") as fh:
+            return cls.from_dict(json.load(fh))
 
     def wall_thickness_at(self, y: float) -> list[float] | None:
         """Return the wall thickness per section at spanwise station *y*.
