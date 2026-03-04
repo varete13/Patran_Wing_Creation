@@ -1,9 +1,16 @@
 """Wing Profiler for Nastran/Patran FEA.
 
-Generates NACA 4-digit airfoil wing geometry and exports to BDF/SES formats.
+Loads wing configurations from JSON files in configs/ and produces plots and
+SES exports.  Run generate_configs.py first to create or update the JSON files.
+
+Usage::
+
+    python generate_configs.py   # create / refresh configs/
+    python main.py               # plot and export
 """
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 from perfilador import (
     NACAAirfoil,
@@ -11,55 +18,48 @@ from perfilador import (
     plot_3d_view,
     plot_side_view,
     save_ses,
-    plot_rib
+    save_bdf,
+    FEAProperties,
+    plot_rib,
 )
+
+CONFIGS = Path("configs")
+
+
+def load(name: str) -> Wing:
+    """Load a wing configuration from configs/<name>.json."""
+    return Wing.from_json(CONFIGS / f"{name}.json")
 
 
 def main() -> None:
-    span = 35.0
+    # ------------------------------------------------------------------
+    # Load all wing variants from JSON
+    # ------------------------------------------------------------------
+    wing_const           = load("wing_const")
+    wing_var             = load("wing_var")
+    wing_optimized       = load("wing_optimized")
+    wing_cosine          = load("wing_cosine")
+    wing_hollow          = load("wing_hollow")
+    wing_hollow_var      = load("wing_hollow_var")
+    wing_combined        = load("wing_combined")
+    wing_cuts            = load("wing_cuts")
+    wing_cuts_hollow     = load("wing_cuts_hollow")
+    wing_cuts_hollow_var = load("wing_cuts_hollow_var")
 
-    # --- Constant airfoil along the span ---
-    wing_const = Wing(
-        airfoil=NACAAirfoil("6412"),
-        span=span,
-        n_ribs=10,
-        spar_positions=[0.2, 0.65],
-        stringer_positions=np.linspace(0.05, 0.8, 8),
-        chord_distribution=([0, 5.18, span], [9, 7, 2]),
-        offset_distribution=([0, 5.18, span], [0, 2.42, 13.06]),
-        twist_distribution=([0, span], [np.deg2rad(2), -np.deg2rad(4)]),
-        elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
-        n_skin_points=20,
-    )
-
-    # --- Variable airfoil along the span ---
-    # Thick, high-camber root (6415) transitioning to thin,
-    # low-camber tip (2409) through an intermediate station (4412).
-    wing_var = Wing(
-        airfoil_distribution={0: "6415", span / 2: "4412", span: "2409"},
-        span=span,
-        n_ribs=10,
-        spar_positions=[0.2, 0.65],
-        stringer_positions=np.linspace(0.05, 0.8, 8),
-        chord_distribution=([0, 5.18, span], [9, 7, 2]),
-        offset_distribution=([0, 5.18, span], [0, 2.42, 13.06]),
-        twist_distribution=([0, span], [np.deg2rad(2), -np.deg2rad(4)]),
-        elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
-        n_skin_points=20,
-    )
-
-
-    # Compare side views
-
+    # ------------------------------------------------------------------
+    # Side views — constant vs variable profile
+    # ------------------------------------------------------------------
     _, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     ax1.set_aspect("equal")
     ax2.set_aspect("equal")
     plot_side_view(wing_const, ax1)
     ax1.set_title("Constant profile (NACA 6412)")
     plot_side_view(wing_var, ax2)
-    ax2.set_title("Variable profile (6415 -> 4412 -> 2409)")
+    ax2.set_title("Variable profile (6415 → 4412 → 2409)")
 
-    # 3D views
+    # ------------------------------------------------------------------
+    # 3-D views
+    # ------------------------------------------------------------------
     _, (ax3, ax4) = plt.subplots(
         1, 2, figsize=(16, 6), subplot_kw={"projection": "3d"}
     )
@@ -68,45 +68,9 @@ def main() -> None:
     plot_3d_view(wing_var, ax4)
     ax4.set_title("Variable profile")
 
-
-    # --- Optimized skin resolution for a given entity budget ---
-    n_sp = Wing.max_skin_points(
-        n_ribs=10,
-        n_spars=len([0.2, 0.65]),
-        n_stringers=len(np.linspace(0.05, 0.8, 8)),
-        max_entities=1_190,
-    )
-    print(f"\nOptimal n_skin_points for 10k budget: {n_sp}")
-
-    wing_optimized = Wing(
-        airfoil=NACAAirfoil("6412"),
-        span=span,
-        n_ribs=10,
-        spar_positions=[0.2, 0.65],
-        stringer_positions=np.linspace(0.05, 0.8, 8),
-        chord_distribution=([0, 5.18, span], [9, 7, 2]),
-        offset_distribution=([0, 5.18, span], [0, 2.42, 13.06]),
-        twist_distribution=([0, span], [np.deg2rad(2), -np.deg2rad(4)]),
-        elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
-        n_skin_points=n_sp,
-    )
-    # --- Cosine point spacing (clusters points near LE and TE) ---
-    wing_cosine = Wing(
-        airfoil=NACAAirfoil("6412"),
-        span=span,
-        n_ribs=10,
-        spar_positions=[0.2, 0.65],
-        stringer_positions=np.linspace(0.05, 0.8, 8),
-        chord_distribution=([0, 5.18, span], [9, 7, 2]),
-        offset_distribution=([0, 5.18, span], [0, 2.42, 13.06]),
-        twist_distribution=([0, span], [np.deg2rad(2), -np.deg2rad(4)]),
-        elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
-        n_skin_points=n_sp,
-        point_spacing="cosine",
-    )
-
-    # Compare uniform vs cosine spacing on the root rib
-
+    # ------------------------------------------------------------------
+    # Uniform vs cosine spacing on the root rib
+    # ------------------------------------------------------------------
     _, (ax5, ax6) = plt.subplots(1, 2, figsize=(14, 5))
     ax5.set_aspect("equal")
     ax6.set_aspect("equal")
@@ -115,116 +79,42 @@ def main() -> None:
     plot_rib(wing_cosine.ribs[0], ax6)
     ax6.set_title("Cosine spacing")
 
-    # --- Hollow ribs (interior cavities via wall offset) ---
-    # Each section (LE, spar box, TE) gets an independent wall thickness.
-    wing_hollow = Wing(
-        airfoil=NACAAirfoil("6412"),
-        span=span,
-        n_ribs=10,
-        spar_positions=[0.2, 0.65],
-        stringer_positions=np.linspace(0.05, 0.8, 8),
-        chord_distribution=([0, 5.18, span], [9, 7, 2]),
-        offset_distribution=([0, 5.18, span], [0, 2.42, 13.06]),
-        twist_distribution=([0, span], [np.deg2rad(2), -np.deg2rad(4)]),
-        elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
-        point_spacing="cosine",
-        n_skin_points=n_sp,
-        wall_thickness=[0.08, 0.10, 0.06],  # LE, spar box, TE
-    )
-
+    # ------------------------------------------------------------------
+    # Hollow ribs
+    # ------------------------------------------------------------------
     _, (ax7, ax8) = plt.subplots(1, 2, figsize=(14, 5))
     ax7.set_aspect("equal")
     ax8.set_aspect("equal")
     plot_rib(wing_hollow.ribs[0], ax7)
-    ax7.set_title("Hollow rib — root (chord=9m)")
+    ax7.set_title("Hollow rib — root (chord=9 m)")
     plot_rib(wing_hollow.ribs[4], ax8)
     ax8.set_title("Hollow rib — mid-span")
 
-    # --- Variable wall thickness along the span ---
-    # Wall thickness tapers from root to tip in each section:
-    #   LE section:   0.10 m (root) → 0.04 m (tip)
-    #   Spar box:     0.12 m (root) → 0.05 m (tip)
-    #   TE section:   0.08 m (root) → 0.03 m (tip)
-    wing_hollow_var = Wing(
-        airfoil=NACAAirfoil("6412"),
-        span=span,
-        n_ribs=10,
-        spar_positions=[0.2, 0.65],
-        stringer_positions=np.linspace(0.05, 0.8, 8),
-        chord_distribution=([0, 5.18, span], [9, 7, 2]),
-        offset_distribution=([0, 5.18, span], [0, 2.42, 13.06]),
-        twist_distribution=([0, span], [np.deg2rad(2), -np.deg2rad(4)]),
-        elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
-        point_spacing="cosine",
-        n_skin_points=n_sp,
-        wall_thickness={
-            0:    [0.10, 0.12, 0.08],   # root:  LE, spar box, TE
-            span: [0.05, 0.05, 0.05],   # tip:   LE, spar box, TE
-        },
-    )
-
+    # ------------------------------------------------------------------
+    # Variable wall thickness
+    # ------------------------------------------------------------------
     _, (ax9, ax10) = plt.subplots(1, 2, figsize=(14, 5))
     ax9.set_aspect("equal")
     ax10.set_aspect("equal")
     plot_rib(wing_hollow_var.ribs[0], ax9)
     ax9.set_title("Variable wall — root (t=0.10/0.12/0.08 m)")
     plot_rib(wing_hollow_var.ribs[-1], ax10)
-    ax10.set_title("Variable wall — tip (t=0.04/0.05/0.03 m)")
+    ax10.set_title("Variable wall — tip (t=0.05/0.05/0.05 m)")
 
-    # --- Combined: variable airfoil + variable wall thickness ---
-    # Root: thick cambered section (6415), heavy walls.
-    # Mid:  intermediate section  (4412), medium walls.
-    # Tip:  thin low-camber section (2409), thin walls.
-    wing_combined = Wing(
-        airfoil_distribution={
-            0:        "6415",
-            span / 2: "4412",
-            span:     "2409",
-        },
-        span=span,
-        n_ribs=10,
-        spar_positions=[0.2, 0.65],
-        stringer_positions=np.linspace(0.05, 0.8, 8),
-        chord_distribution=([0, 5.18, span], [9, 7, 2]),
-        offset_distribution=([0, 5.18, span], [0, 2.42, 13.06]),
-        twist_distribution=([0, span], [np.deg2rad(2), -np.deg2rad(4)]),
-        elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
-        point_spacing="cosine",
-        n_skin_points=n_sp,
-        wall_thickness={
-            0:        [0.20, 0.15, 0.1],   # root:  LE, spar box, TE
-            span / 2: [0.10, 0.08, 0.05],   # mid
-            span:     [0.05, 0.05, 0.05],   # tip
-        },
-    )
-
+    # ------------------------------------------------------------------
+    # Combined: variable airfoil + variable wall thickness
+    # ------------------------------------------------------------------
     _, (ax11, ax12) = plt.subplots(1, 2, figsize=(14, 5))
     ax11.set_aspect("equal")
     ax12.set_aspect("equal")
     plot_rib(wing_combined.ribs[0], ax11)
-    ax11.set_title("Combined — root (6415, t=0.10/0.12/0.08 m)")
+    ax11.set_title("Combined — root (6415, t=0.20/0.15/0.10 m)")
     plot_rib(wing_combined.ribs[-1], ax12)
-    ax12.set_title("Combined — tip (2409, t=0.04/0.05/0.03 m)")
+    ax12.set_title("Combined — tip (2409, t=0.05/0.05/0.05 m)")
 
-    # --- Inner cuts: subdivide LE section of every rib ---
-    # Local profile indices (0-based): 2 = upper LE, 43 = lower LE (~1/3 arc
-    # from the front spar on each surface for n_sp≈25 cosine spacing).
-    # Using a list applies the same cut to ALL ribs in one step.
-    wing_cuts = Wing(
-        airfoil=NACAAirfoil("6412"),
-        span=span,
-        n_ribs=10,
-        spar_positions=[0.2, 0.65],
-        stringer_positions=np.linspace(0.05, 0.8, 8),
-        chord_distribution=([0, 5.18, span], [9, 7, 2]),
-        offset_distribution=([0, 5.18, span], [0, 2.42, 13.06]),
-        twist_distribution=([0, span], [np.deg2rad(2), -np.deg2rad(4)]),
-        elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
-        n_skin_points=n_sp,
-        point_spacing="cosine",
-        inner_cuts=[(2, 43)],   # global: same cut on every rib
-    )
-
+    # ------------------------------------------------------------------
+    # Inner cuts
+    # ------------------------------------------------------------------
     print("\nInner cuts — root rib section breakdown:")
     for sec_name, subsections in wing_cuts.ribs[0].cut_sections.items():
         for k, sub in enumerate(subsections, 1):
@@ -239,45 +129,9 @@ def main() -> None:
     plot_rib(wing_cuts.ribs[0], ax14)
     ax14.set_title("Con inner_cuts — LE cortado en 2")
 
-    # --- Inner cuts + hollow sub-sections (constant wall thickness) ---
-    # One wall thickness value per standard section (LE, Box, TE).
-    wing_cuts_hollow = Wing(
-        airfoil=NACAAirfoil("6412"),
-        span=span,
-        n_ribs=10,
-        spar_positions=[0.2, 0.65],
-        stringer_positions=np.linspace(0.05, 0.8, 8),
-        chord_distribution=([0, 5.18, span], [9, 7, 2]),
-        offset_distribution=([0, 5.18, span], [0, 2.42, 13.06]),
-        twist_distribution=([0, span], [np.deg2rad(2), -np.deg2rad(4)]),
-        elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
-        n_skin_points=n_sp,
-        point_spacing="cosine",
-        inner_cuts=[(2, 43)],
-        cut_wall_thickness=[0.15, 0.12, 0.10],  # LE, Box, TE
-    )
-
-    # --- Inner cuts + hollow sub-sections (variable wall thickness) ---
-    # Wall thickness tapers from root to tip per section.
-    wing_cuts_hollow_var = Wing(
-        airfoil=NACAAirfoil("6412"),
-        span=span,
-        n_ribs=10,
-        spar_positions=[0.2, 0.65],
-        stringer_positions=np.linspace(0.05, 0.8, 8),
-        chord_distribution=([0, 5.18, span], [9, 7, 2]),
-        offset_distribution=([0, 5.18, span], [0, 2.42, 13.06]),
-        twist_distribution=([0, span], [np.deg2rad(2), -np.deg2rad(4)]),
-        elevation_distribution=([0, span], [0, span * np.sin(6 * np.pi / 180)]),
-        n_skin_points=n_sp,
-        point_spacing="cosine",
-        inner_cuts=[(2, 43)],
-        cut_wall_thickness={
-            0:    [0.18, 0.15, 0.12],   # root:  LE, Box, TE
-            span: [0.08, 0.06, 0.05],   # tip:   LE, Box, TE
-        },
-    )
-
+    # ------------------------------------------------------------------
+    # Inner cuts + hollow sub-sections
+    # ------------------------------------------------------------------
     _, (ax15, ax16) = plt.subplots(1, 2, figsize=(14, 5))
     ax15.set_aspect("equal")
     ax16.set_aspect("equal")
@@ -286,29 +140,36 @@ def main() -> None:
     plot_rib(wing_cuts_hollow_var.ribs[0], ax16)
     ax16.set_title("Inner cuts + hollow (var. wall) — root")
 
-    # --- Section map: identify local indices for inner_cuts ---
+    # ------------------------------------------------------------------
+    # Section map — identify local indices for inner_cuts
+    # ------------------------------------------------------------------
     Wing.section_map_plot(
         airfoil=NACAAirfoil("6412"),
         spar_positions=[0.2, 0.65],
         stringer_positions=np.linspace(0.05, 0.8, 8),
-        n_skin_points=n_sp,
+        n_skin_points=wing_optimized.n_skin_points,
         point_spacing="cosine",
     )
 
     # plt.show()
-    # Export
-    save_ses(wing_const, "wing_constant_profile.ses.01")
-    save_ses(wing_var, "wing_variable_profile.ses.01")
-    save_ses(wing_optimized, "wing_optimized_profile.ses.01")
-    save_ses(wing_cosine, "wing_cosine_spacing.ses.01")
-    save_ses(wing_hollow, "wing_hollow_ribs.ses.01")
-    save_ses(wing_hollow_var, "wing_hollow_variable_wall.ses.01")
-    save_ses(wing_combined, "wing_combined.ses.01")
-    save_ses(wing_cuts, "wing_inner_cuts.ses.01")
-    save_ses(wing_cuts_hollow, "wing_inner_cuts_hollow.ses.01")
+
+    # ------------------------------------------------------------------
+    # Export SES
+    # ------------------------------------------------------------------
+    save_ses(wing_const,           "wing_constant_profile.ses.01")
+    save_ses(wing_var,             "wing_variable_profile.ses.01")
+    save_ses(wing_optimized,       "wing_optimized_profile.ses.01")
+    save_ses(wing_cosine,          "wing_cosine_spacing.ses.01")
+    save_ses(wing_hollow,          "wing_hollow_ribs.ses.01")
+    save_ses(wing_hollow_var,      "wing_hollow_variable_wall.ses.01")
+    save_ses(wing_combined,        "wing_combined.ses.01")
+    save_ses(wing_cuts,            "wing_inner_cuts.ses.01")
+    save_ses(wing_cuts_hollow,     "wing_inner_cuts_hollow.ses.01")
     save_ses(wing_cuts_hollow_var, "wing_inner_cuts_hollow_var.ses.01")
+
+    save_bdf(wing_combined,        "wing_combined.bdf",FEAProperties(),n_span_div=4,n_rib_layers=4)
+
 
 
 if __name__ == "__main__":
     main()
-

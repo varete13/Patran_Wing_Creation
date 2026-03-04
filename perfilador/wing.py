@@ -8,6 +8,7 @@ import numpy as np
 from scipy.interpolate import interp1d
 
 from .airfoil import NACAAirfoil
+from .fea_props import FEAProperties
 from .id_manager import IDManager, IDScheme
 from .rib import Rib
 
@@ -129,6 +130,7 @@ class Wing:
         cut_wall_thickness: list[float] | dict[float, list[float]] | None = None,
         wall_thickness_kind: Literal["linear", "quadratic", "cubic", "previous", "next"] = "linear",
         cut_wall_thickness_kind: Literal["linear", "quadratic", "cubic", "previous", "next"] = "linear",
+        fea_properties: FEAProperties | None = None,
     ) -> None:
         if airfoil is None and airfoil_distribution is None:
             raise ValueError("Provide either 'airfoil' or 'airfoil_distribution'")
@@ -157,8 +159,10 @@ class Wing:
             "cut_wall_thickness":   cut_wall_thickness,
             "wall_thickness_kind":  wall_thickness_kind,
             "cut_wall_thickness_kind": cut_wall_thickness_kind,
+            "fea_properties": fea_properties.to_dict() if fea_properties is not None else None,
         }
 
+        self.fea_properties = fea_properties
         self.span = span
         self.n_ribs = n_ribs
         self.spar_positions = spar_positions
@@ -365,6 +369,7 @@ class Wing:
                                     else p["cut_wall_thickness"],
             "wall_thickness_kind":     p["wall_thickness_kind"],
             "cut_wall_thickness_kind": p["cut_wall_thickness_kind"],
+            "fea_properties":          p["fea_properties"],
         }
 
     @classmethod
@@ -414,6 +419,8 @@ class Wing:
             cut_wall_thickness=_float_keys(d.get("cut_wall_thickness")),
             wall_thickness_kind=d.get("wall_thickness_kind", "linear"),
             cut_wall_thickness_kind=d.get("cut_wall_thickness_kind", "linear"),
+            fea_properties=FEAProperties.from_dict(d["fea_properties"])
+                           if d.get("fea_properties") else None,
         )
 
     def to_json(self, path) -> None:
