@@ -154,6 +154,19 @@ configs: dict[str, Wing] = {
         },
         **BASE,
     ),
+
+    # Megalodo — same as wing_cuts_hollow_var with a fixed 50-point skin
+    "megalodo": Wing(
+        airfoil=NACAAirfoil("6412"),
+        n_skin_points=50,
+        point_spacing="cosine",
+        inner_cuts=[(3, 85)],                   # (2, 43) remapped to 50 skin points
+        cut_wall_thickness={
+            0:    [0.18, 0.15, 0.12],           # root
+            span: [0.08, 0.06, 0.05],           # tip
+        },
+        **BASE,
+    ),
 }
 
 # ---------------------------------------------------------------------------
