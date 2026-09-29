@@ -5,11 +5,12 @@ Generates a BDF file via pyNastran containing:
 - PSHELL cards for the three shell structural groups.
 - PBAR card for the stringer bar elements.
 - GRID cards for all outer-profile nodes plus inner/intermediate ring nodes.
-- CQUAD4 concentric mesh per rib section (LE / Box / TE); both hollow and solid
-  sections use proper non-degenerate rings (solid sections get a virtual inner
-  contour contracted 95% toward the section centroid).
-- CQUAD4 spar webs and skin panels between adjacent ribs, with optional
-  spanwise subdivision controlled by *n_span_div*.
+- Rib-face CQUAD4/CTRIA3 mesh built by the selected *rib_mesher* (see
+  :mod:`perfilador.mesh`), which honours hollow sections, ``inner_cuts`` and
+  their cavities.  ``"legacy"`` keeps the original concentric-ring mesh.
+- CQUAD4 spar webs, subdivided into *n_web* elements through the height and
+  sharing those nodes with the rib faces, and skin panels between adjacent
+  ribs, with optional spanwise subdivision controlled by *n_span_div*.
 - CBAR stringer elements between adjacent ribs, also subdivided by *n_span_div*.
 
 Coordinate convention (consistent with the SES exporter):
@@ -30,6 +31,8 @@ if TYPE_CHECKING:
     from ..wing import Wing
 
 from ..fea_props import BarProps, FEAProperties, MatProps
+from ..mesh import mesh_rib_face
+from ..mesh.topology import RibMesh, rib_points, web_key, web_node_xy
 
 # -------------------------------------------------------------------------
 # Property / material IDs (fixed, no collision with GRID or element IDs)
@@ -311,6 +314,38 @@ def _add_rib_face(
                 )
 
 
+def _add_rib_mesh(
+    rib: Rib,
+    mesh: RibMesh,
+    model: BDF,
+    gid_counter,
+    eid_counter,
+) -> dict:
+    """Write a :class:`RibMesh` into *model* as GRID + CQUAD4/CTRIA3 cards.
+
+    Profile nodes (``("p", i)``) map to the existing outer GRIDs; every other
+    node gets a new GID from *gid_counter*.  Returns the ``key -> GID`` map so
+    the spar webs can reuse the web-edge nodes.
+    """
+    y = rib.span_position
+    ps = rib.ids.point_start
+    gid: dict = {}
+    for key, xy in mesh.nodes.items():
+        if key[0] == "p":
+            gid[key] = ps + key[1]
+        else:
+            g = next(gid_counter)
+            model.add_grid(g, [float(xy[0]), float(xy[1]), y])
+            gid[key] = g
+    for elem in mesh.elements:
+        nids = [gid[k] for k in elem]
+        if len(nids) == 4:
+            model.add_cquad4(next(eid_counter), _PID_RIB, nids)
+        else:
+            model.add_ctria3(next(eid_counter), _PID_RIB, nids)
+    return gid
+
+
 def _interp_span_rows(
     r: Rib,
     r1: Rib,
@@ -353,39 +388,87 @@ def _interp_span_rows(
     return rows
 
 
+def _spar_web_column(
+    rib: Rib,
+    k: int,
+    n_web: int,
+    rib_gids: dict,
+    model: BDF,
+    gid_counter,
+) -> list[int]:
+    """GIDs along spar *k* of *rib*, upper → lower (``n_web + 1`` nodes).
+
+    Web-edge nodes already created by the rib-face mesher are reused; missing
+    ones (e.g. with the legacy mesher) are created on the straight web.
+    """
+    ns = len(rib.spar_positions)
+    ps = rib.ids.point_start
+    iu = rib.spar_ids[k] - ps
+    il = rib.spar_ids[2 * ns - 1 - k] - ps
+    col = [ps + iu]
+    P = None
+    for s in range(1, n_web):
+        key = web_key(iu, il, s, n_web)
+        if key not in rib_gids:
+            if P is None:
+                P = rib_points(rib)
+            xy = web_node_xy(P, key, n_web)
+            g = next(gid_counter)
+            model.add_grid(g, [float(xy[0]), float(xy[1]), rib.span_position])
+            rib_gids[key] = g
+        col.append(rib_gids[key])
+    col.append(ps + il)
+    return col
+
+
 def _add_spar_elements(
     r: Rib,
     r1: Rib,
     model: BDF,
     eid_counter,
     interp_rows: list[list[int]] = (),
+    n_web: int = 1,
+    web_r: dict | None = None,
+    web_r1: dict | None = None,
+    gid_counter=None,
 ) -> None:
     """Add CQUAD4 spar web panels between adjacent ribs *r* / *r1*.
 
-    *interp_rows* are intermediate profile-node rows produced by
-    :func:`_interp_span_rows`.  Each spar creates one CQUAD4 per consecutive
-    row pair (``len(interp_rows) + 1`` panels total).
+    Each spar web is split into ``len(interp_rows) + 1`` panels along the
+    span and *n_web* panels through the height.  The height nodes at the ribs
+    are shared with the rib-face mesh (*web_r*, *web_r1*: ``key -> GID``);
+    those on the intermediate rows are interpolated along the straight web.
     """
     ns = len(r.spar_positions)
+    web_r = {} if web_r is None else web_r
+    web_r1 = {} if web_r1 is None else web_r1
+    ps = r.ids.point_start
 
-    def _spar_row(rib: Rib, row: list[int]) -> list[int]:
-        p = rib.ids.point_start
-        return [row[rib.spar_ids[k] - p] for k in range(2 * ns)]
+    for k in range(ns):
+        iu = r.spar_ids[k] - ps
+        il = r.spar_ids[2 * ns - 1 - k] - ps
+        cols = [_spar_web_column(r, k, n_web, web_r, model, gid_counter)]
+        for row in interp_rows:
+            gu, gl = row[iu], row[il]
+            col = [gu]
+            if n_web > 1:
+                xu = np.asarray(model.nodes[gu].xyz)
+                xl = np.asarray(model.nodes[gl].xyz)
+                for s in range(1, n_web):
+                    t = s / n_web
+                    g = next(gid_counter)
+                    model.add_grid(g, list((1.0 - t) * xu + t * xl))
+                    col.append(g)
+            col.append(gl)
+            cols.append(col)
+        cols.append(_spar_web_column(r1, k, n_web, web_r1, model, gid_counter))
 
-    r0_spar = list(r.spar_ids)
-    r1_spar = list(r1.spar_ids)
-    all_rows = (
-        [r0_spar]
-        + [_spar_row(r, row) for row in interp_rows]
-        + [r1_spar]
-    )
-    for row_a, row_b in zip(all_rows, all_rows[1:]):
-        for k in range(ns):
-            model.add_cquad4(
-                next(eid_counter), _PID_SPAR,
-                [row_a[k], row_b[k],
-                 row_b[2 * ns - 1 - k], row_a[2 * ns - 1 - k]],
-            )
+        for ca, cb in zip(cols, cols[1:]):
+            for s in range(n_web):
+                model.add_cquad4(
+                    next(eid_counter), _PID_SPAR,
+                    [ca[s], cb[s], cb[s + 1], ca[s + 1]],
+                )
 
 
 def _add_skin_elements(
@@ -456,6 +539,8 @@ def save_bdf(
     fea: FEAProperties | None = None,
     n_rib_layers: int = 2,
     n_span_div: int = 1,
+    rib_mesher: str = "legacy",
+    n_web: int = 1,
 ) -> None:
     """Write a Nastran BDF file with a full structural mesh via pyNastran.
 
@@ -489,6 +574,14 @@ def save_bdf(
         Number of spanwise divisions per rib bay for skin, spar and stringer
         elements.  ``1`` (default) gives a single element per bay.
         Values > 1 insert ``n_span_div - 1`` intermediate profile-node rows.
+    rib_mesher : str
+        Rib-face mesher (see :data:`perfilador.mesh.RIB_MESHERS`).
+        ``"legacy"`` is the original concentric-ring mesh, which ignores
+        ``inner_cuts``.  For the other meshers *n_rib_layers* is the number of
+        element layers across each cavity wall.
+    n_web : int
+        Elements through the height of each spar web and along each cut line.
+        Must be ``1`` with the legacy mesher.
 
     Raises
     ------
@@ -527,6 +620,14 @@ def save_bdf(
         raise ValueError(
             "FEAProperties are required for BDF export.  "
             "Pass fea= to save_bdf() or set wing.fea_properties."
+        )
+
+    if n_web < 1:
+        raise ValueError("n_web must be >= 1")
+    if rib_mesher == "legacy" and n_web != 1:
+        raise ValueError(
+            "The legacy rib mesher has no nodes along the spar webs; "
+            "use n_web=1 or another rib_mesher."
         )
 
     if filename is None:
@@ -568,18 +669,45 @@ def save_bdf(
     # ------------------------------------------------------------------
     # Grid points + rib face elements
     # ------------------------------------------------------------------
+    web_gids: list[dict] = []
     for rib in wing.ribs:
         _add_rib_outer_grids(rib, model)
-        _add_rib_face(rib, n_rib_layers, model, gid_inner, eid_rib)
+        if rib_mesher == "legacy":
+            _add_rib_face(rib, n_rib_layers, model, gid_inner, eid_rib)
+            web_gids.append({})
+        else:
+            mesh = mesh_rib_face(rib, rib_mesher, n_web=n_web, n_wall=n_rib_layers)
+            web_gids.append(
+                _add_rib_mesh(rib, mesh, model, gid_inner, eid_rib)
+            )
 
     # ------------------------------------------------------------------
     # Spanwise elements (spar webs, skin panels, stringers)
     # ------------------------------------------------------------------
-    for r, r1 in zip(wing.ribs, wing.ribs[1:]):
+    for i, (r, r1) in enumerate(zip(wing.ribs, wing.ribs[1:])):
         rows = _interp_span_rows(r, r1, n_span_div, model, gid_interp)
-        _add_spar_elements(r, r1, model, eid_spar, rows)
+        _add_spar_elements(
+            r, r1, model, eid_spar, rows,
+            n_web=n_web, web_r=web_gids[i], web_r1=web_gids[i + 1],
+            gid_counter=gid_interp,
+        )
         _add_skin_elements(r, r1, model, eid_skin, rows)
         _add_stringer_elements(r, r1, model, eid_stringer, rows)
+
+    # ------------------------------------------------------------------
+    # ID-range overflow check (each group has a fixed, contiguous range)
+    # ------------------------------------------------------------------
+    for name, counter, limit in (
+        ("rib element", eid_rib, _EID_SPAR_START),
+        ("spar element", eid_spar, _EID_SKIN_START),
+        ("skin element", eid_skin, _EID_STRINGER_START),
+        ("rib-face GRID", gid_inner, _GID_INTERP_START),
+    ):
+        if next(counter) > limit:
+            raise ValueError(
+                f"Too many {name}s for the fixed ID range ending at {limit - 1}; "
+                "reduce the mesh density."
+            )
 
     # ------------------------------------------------------------------
     # Validate and write

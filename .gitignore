@@ -3,3 +3,5 @@
 *.txt
 *.log
 *.bdf
+__pycache__/
+.pytest_cache/
