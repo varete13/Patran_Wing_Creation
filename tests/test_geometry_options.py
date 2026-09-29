@@ -42,9 +42,11 @@ def test_exact_stations_roundtrip_json(tmp_path):
 
 def test_legacy_rejects_web_subdivision(tmp_path, fea):
     with pytest.raises(ValueError):
-        save_bdf(make_wing("solid"), str(tmp_path / "x.bdf"), fea=fea, n_web=3)
+        save_bdf(make_wing("solid"), str(tmp_path / "x.bdf"), fea=fea,
+                 rib_mesher="legacy", n_web=3)
 
 
 def test_legacy_export_still_works(tmp_path, fea):
-    save_bdf(make_wing("hollow"), str(tmp_path / "x.bdf"), fea=fea)
+    save_bdf(make_wing("hollow"), str(tmp_path / "x.bdf"), fea=fea,
+             rib_mesher="legacy")
     assert (tmp_path / "x.bdf").stat().st_size > 0

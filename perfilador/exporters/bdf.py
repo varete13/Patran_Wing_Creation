@@ -539,8 +539,8 @@ def save_bdf(
     fea: FEAProperties | None = None,
     n_rib_layers: int = 2,
     n_span_div: int = 1,
-    rib_mesher: str = "legacy",
-    n_web: int = 1,
+    rib_mesher: str = "native",
+    n_web: int | None = None,
 ) -> None:
     """Write a Nastran BDF file with a full structural mesh via pyNastran.
 
@@ -575,13 +575,15 @@ def save_bdf(
         elements.  ``1`` (default) gives a single element per bay.
         Values > 1 insert ``n_span_div - 1`` intermediate profile-node rows.
     rib_mesher : str
-        Rib-face mesher (see :data:`perfilador.mesh.RIB_MESHERS`).
-        ``"legacy"`` is the original concentric-ring mesh, which ignores
-        ``inner_cuts``.  For the other meshers *n_rib_layers* is the number of
-        element layers across each cavity wall.
-    n_web : int
+        Rib-face mesher: ``"native"`` (default, structured, pure Python)
+        or ``"legacy"`` (the original
+        concentric-ring mesh, which ignores ``inner_cuts``).  For the
+        structured meshers *n_rib_layers* is the number of element layers
+        across each cavity wall.
+    n_web : int or None
         Elements through the height of each spar web and along each cut line.
-        Must be ``1`` with the legacy mesher.
+        Defaults to 4, or 1 with the legacy mesher (the only value it
+        supports).
 
     Raises
     ------
@@ -622,6 +624,8 @@ def save_bdf(
             "Pass fea= to save_bdf() or set wing.fea_properties."
         )
 
+    if n_web is None:
+        n_web = 1 if rib_mesher == "legacy" else 4
     if n_web < 1:
         raise ValueError("n_web must be >= 1")
     if rib_mesher == "legacy" and n_web != 1:

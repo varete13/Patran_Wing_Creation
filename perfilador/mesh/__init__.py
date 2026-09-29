@@ -30,6 +30,10 @@ def mesh_rib_face(rib: Rib, method: str, n_web: int = 4, n_wall: int = 2) -> Rib
     return mesher(rib, n_web=n_web, n_wall=n_wall)
 
 
+# Register the meshers (each module adds itself to RIB_MESHERS)
+from . import native  # noqa: E402,F401
+
+
 __all__ = [
     "RIB_MESHERS",
     "RibMesh",
