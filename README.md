@@ -18,7 +18,7 @@ Generates rib profiles, spar and stringer geometry, and exports to **Patran SES 
 - **Hollow cut sub-sections** — independent wall thickness per section for cut geometry.
 - **Section map plot** (`Wing.section_map_plot`) — interactive colour-coded plot of local profile indices to assist in choosing `inner_cuts` pairs.
 - **Patran SES export** — grids, PWL curves, trimmed surfaces, spar/stringer lines and skin quad panels written as Patran session commands.
-- **Nastran BDF export** — GRID cards for standalone use.
+- **Nastran BDF export** — full shell/bar mesh (MAT1, PSHELL, PBAR, GRID, CQUAD4/CTRIA3, CBAR) with a selectable rib-face mesher (see [Rib-face meshing](#rib-face-meshing)).
 - **Automatic ID management** — collision-free Nastran entity numbering that scales with rib count and skin resolution.
 
 ---
@@ -35,6 +35,7 @@ Patran_Wing_Creation/
 │   ├── geometry.py                # offset_polygon, hollow_rib_sections, …
 │   ├── plotting.py                # plot_3d_view, plot_side_view, plot_rib, …
 │   ├── id_manager.py              # IDManager, IDScheme, RibIDs
+│   ├── mesh/                      # rib-face meshers (native, gmsh) + quality checks
 │   └── exporters/
 │       ├── ses.py                 # save_ses — Patran session file
 │       └── bdf.py                 # save_bdf — Nastran BDF
@@ -50,6 +51,8 @@ Patran_Wing_Creation/
 | `scipy` | Spanwise interpolation (`interp1d`) and cross-section integrals |
 | `matplotlib` | Visualisation |
 | `shapely` | Polygon offset for hollow ribs |
+| `pyNastran` | BDF writer |
+| `gmsh` *(optional)* | `rib_mesher="gmsh"` |
 
 Install with:
 
@@ -286,7 +289,7 @@ n_sp = Wing.max_skin_points(
 from perfilador import save_ses, save_bdf
 
 save_ses(wing, "output.ses.01")   # Patran session file
-save_bdf(wing, "output.bdf")      # Nastran BDF (GRID cards)
+save_bdf(wing, "output.bdf", fea=fea)  # Nastran BDF (full mesh)
 ```
 
 The SES file writes four Patran groups:
@@ -297,6 +300,30 @@ The SES file writes four Patran groups:
 | `Tramos_Largueros` | Spar lines and panels |
 | `Tramos_Largerillos` | Stringer lines |
 | `Secciones_Piel` | Skin quad-panel surfaces |
+
+---
+
+## Rib-face meshing
+
+Three interchangeable ways to mesh the rib faces, all honouring hollow
+sections, `inner_cuts` and their cavities:
+
+| Option | How | Call |
+|--------|-----|------|
+| A — native (default) | Structured mesh in pure numpy/shapely: mapped grids, apex grids at the LE/TE, O-grids around cavities | `save_bdf(wing, f, fea=fea)` |
+| B — gmsh | Same topology built as a gmsh model: transfinite (structured) where mappable, quad-dominant elsewhere | `save_bdf(wing, f, fea=fea, rib_mesher="gmsh")` |
+| C — Patran | Patran meshes the SES geometry itself: Paver rib faces, IsoMesh panels, Bar2 stringers, equivalence | `save_ses(wing, f, mesh=True, mesh_size=0.2)` |
+
+`rib_mesher="legacy"` keeps the original concentric-ring mesh (it ignores
+`inner_cuts`).  Useful knobs for A/B: `n_web` (elements through each spar
+web and cut line; the spar webs share those nodes with the ribs, default 4)
+and `n_rib_layers` (element layers across each cavity wall).  Two geometry
+options help the mesh: `Wing(..., exact_stations=True)` puts spars and
+stringers exactly at their chord positions, and `inner_cuts` accepts chord
+fractions `(x_upper, x_lower)` that do not depend on `n_skin_points`.
+
+Quality helpers: `perfilador.mesh.mesh_rib_face`, `mesh_quality`.  Tests:
+`python -m pytest tests`.
 
 ---
 
