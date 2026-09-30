@@ -56,7 +56,8 @@ class IDManager:
         n_cuts_per_rib: int = 0,
         scheme: IDScheme | None = None,
     ) -> None:
-        self.scheme = scheme or IDScheme()
+        # Copy so that widening never mutates a scheme shared by the caller
+        self.scheme = dataclasses.replace(scheme) if scheme else IDScheme()
         self.n_skin_points = n_skin_points
         self.has_inner = has_inner
         self._validate_and_adjust(n_ribs, n_skin_points, n_spars, n_cuts_per_rib)
@@ -65,44 +66,94 @@ class IDManager:
     def _validate_and_adjust(
         self, n_ribs: int, n_skin_points: int, n_spars: int, n_cuts_per_rib: int = 0
     ) -> None:
-        """Iterative replacement for the recursive ``check_name_basis``."""
+        """Widen strides and bases until every ID range is collision-free.
+
+        Rib indices run from ``1`` to ``n_ribs`` (see :meth:`allocate_rib`),
+        so a per-rib range ending at ``base + stride * n_ribs + stride - 1``
+        stays below ``2 * base`` only when ``base >= stride * (n_ribs + 1)``.
+        Spanwise entities (spar and skin panels) use the index of the first
+        rib of each bay, which runs from ``1`` to ``n_ribs - 1``.
+
+        After the per-range checks, ranges of the same Patran entity type
+        (points, surfaces) are checked against each other and the base of
+        the higher range is widened on overlap.
+        """
         s = self.scheme
         # Maximum surfaces per rib: standard sections + one extra per cut
         max_surfaces_per_rib = n_spars + 1 + n_cuts_per_rib
+        n_bays = max(n_ribs - 1, 1)
         changed = True
         while changed:
             changed = False
             if s.point_stride < 2 * n_skin_points:
                 s.point_stride *= 10
                 changed = True
-            if s.point_base < s.point_stride * n_ribs:
+            if s.point_base < s.point_stride * (n_ribs + 1):
                 s.point_base *= 10
                 changed = True
             if s.surface_rib_stride < max_surfaces_per_rib:
                 s.surface_rib_stride *= 10
                 changed = True
-            if s.surface_rib_base < s.surface_rib_stride * n_ribs:
+            if s.surface_rib_base < s.surface_rib_stride * (n_ribs + 1):
                 s.surface_rib_base *= 10
+                changed = True
+            if s.surface_spar_stride < n_spars:
+                s.surface_spar_stride *= 10
+                changed = True
+            if s.surface_spar_base < s.surface_spar_stride * (n_bays + 1):
+                s.surface_spar_base *= 10
                 changed = True
             if s.surface_skin_stride < 2 * n_skin_points:
                 s.surface_skin_stride *= 10
                 changed = True
-            if s.surface_skin_base < s.surface_skin_stride * (n_ribs - 1):
+            if s.surface_skin_base < s.surface_skin_stride * (n_bays + 1):
                 s.surface_skin_base *= 10
                 changed = True
             # Inner contour ID ranges
             if s.inner_point_stride < 2 * n_skin_points:
                 s.inner_point_stride *= 10
                 changed = True
-            if s.inner_point_base < s.inner_point_stride * n_ribs:
+            if s.inner_point_base < s.inner_point_stride * (n_ribs + 1):
                 s.inner_point_base *= 10
                 changed = True
             if s.surface_inner_stride < n_spars + 1:
                 s.surface_inner_stride *= 10
                 changed = True
-            if s.surface_inner_base < s.surface_inner_stride * n_ribs:
+            if s.surface_inner_base < s.surface_inner_stride * (n_ribs + 1):
                 s.surface_inner_base *= 10
                 changed = True
+            if self._widen_overlapping_ranges(n_ribs, n_bays):
+                changed = True
+
+    def _widen_overlapping_ranges(self, n_ribs: int, n_bays: int) -> bool:
+        """Widen one base if two ranges of the same entity type overlap.
+
+        Returns ``True`` when a base was changed, so the caller re-validates.
+        """
+        s = self.scheme
+        families = {
+            "points": [
+                ("point_base", s.point_base, s.point_stride, n_ribs),
+                ("inner_point_base", s.inner_point_base, s.inner_point_stride, n_ribs),
+            ],
+            "surfaces": [
+                ("surface_rib_base", s.surface_rib_base, s.surface_rib_stride, n_ribs),
+                ("surface_spar_base", s.surface_spar_base, s.surface_spar_stride, n_bays),
+                ("surface_skin_base", s.surface_skin_base, s.surface_skin_stride, n_bays),
+                ("surface_inner_base", s.surface_inner_base, s.surface_inner_stride, n_ribs),
+            ],
+        }
+        for ranges in families.values():
+            # (first id, last id, attribute name) of every range, sorted
+            spans = sorted(
+                (base + stride, base + stride * (n_max + 1) - 1, name)
+                for name, base, stride, n_max in ranges
+            )
+            for (_, hi, _), (lo_next, _, name_next) in zip(spans, spans[1:]):
+                if lo_next <= hi:
+                    setattr(s, name_next, getattr(s, name_next) * 10)
+                    return True
+        return False
 
     def allocate_rib(self) -> RibIDs:
         """Return ID ranges for the next rib and advance the counter."""

@@ -5,9 +5,10 @@ Generates a BDF file via pyNastran containing:
 - PSHELL cards for the three shell structural groups.
 - PBAR card for the stringer bar elements.
 - GRID cards for all outer-profile nodes plus inner/intermediate ring nodes.
-- CQUAD4 concentric mesh per rib section (LE / Box / TE); both hollow and solid
-  sections use proper non-degenerate rings (solid sections get a virtual inner
-  contour contracted 95% toward the section centroid).
+- CQUAD4 concentric mesh per rib section (LE / Box / TE), or per inner-cut
+  sub-section when the wing defines ``inner_cuts``; both hollow and solid
+  regions use proper non-degenerate rings (solid regions get a virtual inner
+  contour contracted 95% toward the region centroid).
 - CQUAD4 spar webs and skin panels between adjacent ribs, with optional
   spanwise subdivision controlled by *n_span_div*.
 - CBAR stringer elements between adjacent ribs, also subdivided by *n_span_div*.
@@ -20,6 +21,7 @@ Coordinate convention (consistent with the SES exporter):
 from __future__ import annotations
 
 import itertools
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -44,18 +46,22 @@ _PID_SPAR = 2
 _PID_SKIN = 3
 _PID_STR  = 4
 
-# Element ID counters start well above the GRID ID space
+# Preferred first element ID of each element group.  A group is moved up
+# (see _range_starts) when the previous group would otherwise run into it.
 _EID_RIB_START      = 10_001
 _EID_SPAR_START     = 20_001
 _EID_SKIN_START     = 60_001
 _EID_STRINGER_START = 70_001
 
-# Inner / intermediate ring node IDs start above the outer profile range
-# (max outer profile ID ≈ 100_000 + 1_000 * n_ribs + 2*n_skin_points ≤ ~200_000)
+# Preferred first GRID ID of the rib ring nodes and of the spanwise
+# interpolated rows.  Both are moved above the outer profile GRIDs (and
+# above each other) when the model is large enough to need it.
 _GID_INNER_START = 200_001
-
-# Spanwise interpolated nodes (skin / spar / stringer intermediate rows)
 _GID_INTERP_START = 300_001
+
+# Granularity used when a range has to be moved: the new start is the next
+# multiple of this value plus one, which keeps IDs readable.
+_ID_BLOCK = 10_000
 
 # Virtual inner contour scale for solid rib sections (no cavity).
 # The innermost ring sits at 5 % of the outer section size around the centroid,
@@ -236,6 +242,74 @@ def _section_gids_and_coords(
     return result
 
 
+def _rib_regions(
+    rib: Rib,
+) -> list[tuple[list[int], np.ndarray, np.ndarray | None]]:
+    """Return the closed regions that make up the rib face.
+
+    Without inner cuts there is one region per structural section
+    (LE → TE), with the hollow-rib cavity as its inner contour.  With inner
+    cuts there is one region per cut sub-section, in the same order as
+    ``rib.cut_sections``, with the matching ``rib.cut_inner_profiles``
+    entry as its inner contour.
+
+    Returns
+    -------
+    list of (gids, coords, inner) per region:
+        *gids*   — ordered GIDs of the outer ring.
+        *coords* — (N, 2) coordinates matching *gids*.
+        *inner*  — closed (M, 2) inner cavity contour, or ``None`` if solid.
+    """
+    if rib.cut_sections is None:
+        n_secs = len(rib.spar_positions) + 1
+        inner_profs = rib.inner_profiles or [None] * n_secs
+        return [
+            (gids, coords,
+             None if prof is None else np.column_stack(prof))
+            for (gids, coords), prof in zip(_section_gids_and_coords(rib), inner_profs)
+        ]
+
+    px, py = rib.profile
+    ps = rib.ids.point_start
+    subsections = [sub for subs in rib.cut_sections.values() for sub in subs]
+    inner_profs = rib.cut_inner_profiles or [None] * len(subsections)
+
+    regions: list[tuple[list[int], np.ndarray, np.ndarray | None]] = []
+    for sub, prof in zip(subsections, inner_profs):
+        if len(sub) < 3:
+            logging.debug(
+                "Cut sub-section with %d points at y=%.2fm has no area; "
+                "no rib elements generated for it.", len(sub), rib.span_position,
+            )
+            continue
+        idx = np.asarray(sub)
+        regions.append((
+            [ps + i for i in sub],
+            np.column_stack([px[idx], py[idx]]),
+            None if prof is None else np.column_stack(prof),
+        ))
+    return regions
+
+
+def _range_starts(
+    preferred: list[int], counts: list[int], floor: int = 0
+) -> list[int]:
+    """First ID of each consecutive ID range, free of overlaps.
+
+    Each range keeps its *preferred* start when that start lies above the
+    end of the previous range (or above *floor* for the first one).
+    Otherwise it moves to the next multiple of ``_ID_BLOCK`` plus one.
+    """
+    starts: list[int] = []
+    next_free = floor + 1
+    for start, count in zip(preferred, counts):
+        if start < next_free:
+            start = -(-(next_free - 1) // _ID_BLOCK) * _ID_BLOCK + 1
+        starts.append(start)
+        next_free = start + count
+    return starts
+
+
 # -------------------------------------------------------------------------
 # pyNastran model builders
 # -------------------------------------------------------------------------
@@ -259,29 +333,22 @@ def _add_rib_face(
 ) -> None:
     """Add concentric-ring CQUAD4 face mesh for *rib*.
 
-    For each section (LE / Box / TE) the mesh has *n_layers* layers of
-    CQUAD4 from the outer profile ring inward to either the inner cavity
-    contour (hollow rib) or a virtual inner contour (solid rib).
+    For each region returned by :func:`_rib_regions` (a structural section,
+    or an inner-cut sub-section) the mesh has *n_layers* layers of CQUAD4
+    from the outer profile ring inward to either the inner cavity contour
+    (hollow region) or a virtual inner contour (solid region).
 
-    Solid sections use a virtual inner contour computed by contracting the
-    outer ring by :data:`_SOLID_INNER_SCALE` toward the section centroid.
+    Solid regions use a virtual inner contour computed by contracting the
+    outer ring by :data:`_SOLID_INNER_SCALE` toward the region centroid.
     This produces proper (non-degenerate) CQUAD4 elements throughout.
     """
     y = rib.span_position
-    n_secs = len(rib.spar_positions) + 1
-    inner_profs = rib.inner_profiles or ([None] * n_secs)
 
-    for sec_idx, (outer_gids, outer_coords) in enumerate(
-        _section_gids_and_coords(rib)
-    ):
+    for outer_gids, outer_coords, inner_poly in _rib_regions(rib):
         n = len(outer_gids)
-        inner_prof = inner_profs[sec_idx]
 
-        if inner_prof is not None:
-            ix, iy = inner_prof
-            inner_coords = _aligned_resample(
-                np.column_stack([ix, iy]), n, outer_coords[0]
-            )
+        if inner_poly is not None:
+            inner_coords = _aligned_resample(inner_poly, n, outer_coords[0])
         else:
             # Solid section: virtual inner contour contracted toward centroid.
             centroid = outer_coords.mean(axis=0)
@@ -556,14 +623,31 @@ def save_bdf(
     model.add_pbar(_PID_STR, _MID_STR, A=b.A, i1=b.I1, i2=b.I2, j=b.J)
 
     # ------------------------------------------------------------------
-    # Element ID counters (independent ranges per element group)
+    # ID counters (independent, non-overlapping ranges per group)
     # ------------------------------------------------------------------
-    eid_rib      = itertools.count(_EID_RIB_START)
-    eid_spar     = itertools.count(_EID_SPAR_START)
-    eid_skin     = itertools.count(_EID_SKIN_START)
-    eid_stringer = itertools.count(_EID_STRINGER_START)
-    gid_inner    = itertools.count(_GID_INNER_START)
-    gid_interp   = itertools.count(_GID_INTERP_START)
+    n_bays = len(wing.ribs) - 1
+    n_div = max(n_span_div, 1)
+    n_unique = len(wing.ribs[0].profile[0]) - 1
+    n_ring_nodes = sum(
+        len(gids) for rib in wing.ribs for gids, _, _ in _rib_regions(rib)
+    ) * n_rib_layers
+
+    eid_starts = _range_starts(
+        [_EID_RIB_START, _EID_SPAR_START, _EID_SKIN_START, _EID_STRINGER_START],
+        [
+            n_ring_nodes,                                            # rib CQUAD4
+            len(wing.spar_positions) * n_div * n_bays,               # spar CQUAD4
+            n_unique * n_div * n_bays,                               # skin CQUAD4
+            len(wing.ribs[0].stringer_ids) * n_div * n_bays,         # CBAR
+        ],
+    )
+    gid_starts = _range_starts(
+        [_GID_INNER_START, _GID_INTERP_START],
+        [n_ring_nodes, n_unique * (n_div - 1) * n_bays],
+        floor=max(rib.ids.point_end for rib in wing.ribs),
+    )
+    eid_rib, eid_spar, eid_skin, eid_stringer = map(itertools.count, eid_starts)
+    gid_inner, gid_interp = map(itertools.count, gid_starts)
 
     # ------------------------------------------------------------------
     # Grid points + rib face elements

@@ -142,7 +142,7 @@ shorter in the chord direction at the tip due to taper.
 | `point_spacing` | `"uniform"` \| `"cosine"` | Cosine clusters points near LE/TE. |
 | `min_point_spacing` | `float` \| `None` | Minimum physical distance (m) between profile points. `None` disables. Default `0.005`. |
 | `wall_thickness` | `list[float]` \| `dict[float, list[float]]` \| `None` | Wall thickness per section (LE, box, TE). `list` → constant; `dict` → interpolated along span. |
-| `inner_cuts` | `list[tuple[int,int]]` \| `dict[int, list[tuple[int,int]]]` \| `None` | Additional geometry cuts within sections. See below. |
+| `inner_cuts` | `list[tuple[int,int]]` \| `dict[int, list[tuple[int,int]]]` \| `None` | Additional geometry cuts within sections. Cannot be combined with `wall_thickness`; hollow the cut sub-sections with `cut_wall_thickness`. See below. |
 | `cut_wall_thickness` | `list[float]` \| `dict[float, list[float]]` \| `None` | Wall thickness for inner-cut sub-sections. Same dual format as `wall_thickness`. |
 | `wall_thickness_kind` | `"linear"` \| `"quadratic"` \| `"cubic"` \| … | `scipy.interp1d` `kind` for spanwise wall-thickness interpolation. |
 | `cut_wall_thickness_kind` | same as above | Interpolation kind for cut wall thickness. |
@@ -373,3 +373,16 @@ python main.py
 ```
 
 `main.py` builds ten wing configurations (constant profile, variable profile, cosine spacing, hollow ribs, inner cuts, combined) and exports a `.ses.01` file for each.
+
+---
+
+## Tests
+
+```bash
+pip install pytest
+python -m pytest tests
+```
+
+The tests check that Nastran IDs never collide, that the BDF meshes inner-cut
+sub-sections, and that `Wing.summary()` matches the entities written to the
+SES file.

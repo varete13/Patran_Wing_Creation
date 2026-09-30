@@ -128,7 +128,7 @@ configs: dict[str, Wing] = {
         airfoil=NACAAirfoil("6412"),
         n_skin_points=n_sp,
         point_spacing="cosine",
-        inner_cuts=[(2, 43)],                   # LE section, upper+lower
+        inner_cuts=[(2, 47)],                   # LE section, upper+lower (n_sp = 27)
         **BASE,
     ),
 
@@ -137,7 +137,7 @@ configs: dict[str, Wing] = {
         airfoil=NACAAirfoil("6412"),
         n_skin_points=n_sp,
         point_spacing="cosine",
-        inner_cuts=[(2, 43)],
+        inner_cuts=[(2, 47)],
         cut_wall_thickness=[0.15, 0.12, 0.10],  # LE, spar box, TE
         **BASE,
     ),
@@ -147,7 +147,7 @@ configs: dict[str, Wing] = {
         airfoil=NACAAirfoil("6412"),
         n_skin_points=n_sp,
         point_spacing="cosine",
-        inner_cuts=[(2, 43)],
+        inner_cuts=[(2, 47)],
         cut_wall_thickness={
             0:    [0.18, 0.15, 0.12],           # root
             span: [0.08, 0.06, 0.05],           # tip
@@ -160,7 +160,7 @@ configs: dict[str, Wing] = {
         airfoil=NACAAirfoil("6412"),
         n_skin_points=50,
         point_spacing="cosine",
-        inner_cuts=[(3, 85)],                   # (2, 43) remapped to 50 skin points
+        inner_cuts=[(3, 85)],                   # LE cut remapped to 50 skin points
         cut_wall_thickness={
             0:    [0.18, 0.15, 0.12],           # root
             span: [0.08, 0.06, 0.05],           # tip

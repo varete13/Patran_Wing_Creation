@@ -17,6 +17,8 @@ except ImportError:  # Python < 3.10
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from ..id_manager import IDScheme
     from ..rib import Rib
     from ..wing import Wing
@@ -53,13 +55,52 @@ def _local_ids_to_pwl_str(local_indices: list[int], point_start: int) -> str:
     return "Point " + " ".join(ranges) + f" {nastran[0]}"
 
 
+def _inner_grid_commands(
+    profiles: list[tuple[np.ndarray, np.ndarray] | None],
+    first_id: int,
+    span_position: float,
+) -> tuple[list[str], list[tuple[int, int] | None], int]:
+    """Grid commands for a list of closed inner contours.
+
+    IDs are consecutive from *first_id*.  ``None`` entries (solid regions)
+    get no grids.
+
+    Returns the command lines, the ``(first_id, last_id)`` range of each
+    contour (``None`` for solid entries) and the next free ID.
+    """
+    cmds: list[str] = []
+    ranges: list[tuple[int, int] | None] = []
+    next_id = first_id
+    for profile in profiles:
+        if profile is None:
+            ranges.append(None)
+            continue
+        ix, iy = profile
+        start = next_id
+        for k in range(len(ix) - 1):  # skip closing duplicate
+            cmds.append(
+                f'asm_const_grid_xyz("{next_id:<7.0f}",'
+                f'"[{ix[k]:<7.4f} {iy[k]:<7.4f} '
+                f'{span_position:<7.4f}]", '
+                f'"Coord 0", asm_create_grid_xyz_created_ids) \n'
+            )
+            next_id += 1
+        ranges.append((start, next_id - 1))
+    return cmds, ranges, next_id
+
+
 def _rib_geometry_commands(
     rib: Rib,
     surface_counter: int,
+    inner_stride: int | None = None,
 ) -> tuple[list[str], int]:
     """SES commands for one rib: grid points, PWL curves and trimmed surfaces.
 
     Mirrors the original ``Costilla.ses_Geom_v2``.
+
+    *inner_stride* is the number of inner grid IDs reserved per rib.  When
+    given, a rib that needs more raises ``ValueError`` instead of writing
+    IDs that belong to the next rib.
 
     Returns the command lines and the updated surface counter.
     """
@@ -82,53 +123,37 @@ def _rib_geometry_commands(
             f'"Coord 0", asm_create_grid_xyz_created_ids) \n'
         )
 
-    # --- Inner contour grid points (if hollow rib) ---
-    # Each section's inner contour gets consecutive IDs starting from
-    # inner_point_start.  Track the ID ranges per section for PWL curves.
+    # --- Inner contour grid points ---
+    # Hollow-section cavities and cut sub-section cavities share one running
+    # counter, so their IDs can never repeat even if a Rib carries both.
+    inner_id = rib.ids.inner_point_start
+
+    # Hollow rib: one ID range per section, used by the PWL curves below.
     inner_section_ids: list[tuple[int, int] | None] = []  # (first_id, last_id) or None
     if rib.inner_profiles is not None:
-        inner_id = rib.ids.inner_point_start
-        for sec_idx, profile in enumerate(rib.inner_profiles):
-            if profile is None:
-                inner_section_ids.append(None)
-                continue
-            ix, iy = profile
-            n_inner = len(ix) - 1  # skip closing duplicate
-            first_inner_id = inner_id
-            for k in range(n_inner):
-                cmds.append(
-                    f'asm_const_grid_xyz("{inner_id:<7.0f}",'
-                    f'"[{ix[k]:<7.4f} {iy[k]:<7.4f} '
-                    f'{rib.span_position:<7.4f}]", '
-                    f'"Coord 0", asm_create_grid_xyz_created_ids) \n'
-                )
-                inner_id += 1
-            inner_section_ids.append((first_inner_id, inner_id - 1))
+        inner_cmds, inner_section_ids, inner_id = _inner_grid_commands(
+            rib.inner_profiles, inner_id, rib.span_position
+        )
+        cmds.extend(inner_cmds)
+
+    # Cut sub-sections: one ID range per sub-section.
+    cut_inner_id_ranges: list[tuple[int, int] | None] = []
+    if rib.cut_sections is not None and rib.cut_inner_profiles is not None:
+        inner_cmds, cut_inner_id_ranges, inner_id = _inner_grid_commands(
+            rib.cut_inner_profiles, inner_id, rib.span_position
+        )
+        cmds.extend(inner_cmds)
+
+    n_inner_used = inner_id - rib.ids.inner_point_start
+    if inner_stride is not None and n_inner_used > inner_stride:
+        raise ValueError(
+            f"Rib {rib.ids.rib_index} (y={rib.span_position:.3f}m) needs "
+            f"{n_inner_used} inner grid IDs but the ID scheme reserves "
+            f"{inner_stride} per rib; they would overlap the next rib."
+        )
 
     # --- Inner-cut sub-sections (replaces standard LE/Box/TE surfaces) ---
     if rib.cut_sections is not None:
-        # Export inner contour grid points for each sub-section (if requested).
-        # IDs are allocated sequentially from inner_point_start, same scheme as
-        # hollow ribs (the two features are mutually exclusive).
-        cut_inner_id_ranges: list[tuple[int, int] | None] = []
-        if rib.cut_inner_profiles is not None:
-            inner_id = rib.ids.inner_point_start
-            for inner_prof in rib.cut_inner_profiles:
-                if inner_prof is None:
-                    cut_inner_id_ranges.append(None)
-                    continue
-                ix, iy = inner_prof
-                n_inner = len(ix) - 1  # skip closing duplicate
-                first_inner_id = inner_id
-                for k in range(n_inner):
-                    cmds.append(
-                        f'asm_const_grid_xyz("{inner_id:<7.0f}",'
-                        f'"[{ix[k]:<7.4f} {iy[k]:<7.4f} '
-                        f'{rib.span_position:<7.4f}]", '
-                        f'"Coord 0", asm_create_grid_xyz_created_ids) \n'
-                    )
-                    inner_id += 1
-                cut_inner_id_ranges.append((first_inner_id, inner_id - 1))
 
         cmds.append("STRING asm_create_line_pwl_created_ids[VIRTUAL]\n")
         sub_idx = 0
@@ -289,7 +314,9 @@ def save_ses(wing: Wing, filename: str | None = None) -> None:
             # Initialise the surface counter for this rib exactly as the
             # original: base + stride * rib_index
             surface_counter = rib.ids.surface_base
-            cmds, surface_counter = _rib_geometry_commands(rib, surface_counter)
+            cmds, surface_counter = _rib_geometry_commands(
+                rib, surface_counter, s.inner_point_stride
+            )
             for line in cmds:
                 f.write(line)
 

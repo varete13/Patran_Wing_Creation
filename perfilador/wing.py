@@ -33,6 +33,13 @@ class EntitySummary:
     spar_panel_surfaces: int
     skin_panel_surfaces: int
 
+    # Cavity contour grids of hollow sections and hollow cut sub-sections
+    inner_grid_points: int = 0
+
+    @property
+    def total_points(self) -> int:
+        return self.grid_points + self.inner_grid_points
+
     @property
     def total_lines(self) -> int:
         return self.spar_lines + self.stringer_lines
@@ -43,7 +50,7 @@ class EntitySummary:
 
     @property
     def total_entities(self) -> int:
-        return self.grid_points + self.total_lines + self.total_surfaces
+        return self.total_points + self.total_lines + self.total_surfaces
 
     def __str__(self) -> str:
         pairs = self.n_ribs - 1
@@ -55,6 +62,7 @@ class EntitySummary:
             f"  Stringers: {self.n_stringers}  |  Skin pts: {self.n_skin_points}",
             sep,
             f"  {'Grid points':<28} {self.grid_points:>{w},}",
+            f"  {'Inner grid points':<28} {self.inner_grid_points:>{w},}",
             f"  {'Rib curves (PWL, aux.)':<28} {self.rib_curves:>{w},}",
             f"  {'Rib trimmed surfaces':<28} {self.rib_surfaces:>{w},}",
             sep,
@@ -64,7 +72,7 @@ class EntitySummary:
             f"  {'Spar panel surfaces':<28} {self.spar_panel_surfaces:>{w},}",
             f"  {'Skin panel surfaces':<28} {self.skin_panel_surfaces:>{w},}",
             sep,
-            f"  {'Total points':<28} {self.grid_points:>{w},}",
+            f"  {'Total points':<28} {self.total_points:>{w},}",
             f"  {'Total lines':<28} {self.total_lines:>{w},}",
             f"  {'Total surfaces':<28} {self.total_surfaces:>{w},}",
             sep,
@@ -137,6 +145,13 @@ class Wing:
         if airfoil is not None and airfoil_distribution is not None:
             raise ValueError(
                 "'airfoil' and 'airfoil_distribution' are mutually exclusive"
+            )
+        if inner_cuts and wall_thickness is not None:
+            # Cut sub-sections replace the standard sections, so a per-section
+            # cavity would be exported alongside geometry that no longer uses it.
+            raise ValueError(
+                "'wall_thickness' cannot be combined with 'inner_cuts'.  "
+                "Use 'cut_wall_thickness' to hollow the cut sub-sections."
             )
 
         # ---- snapshot of original parameters for serialisation ----
@@ -504,12 +519,15 @@ class Wing:
 
         The total entity count is linear in *n_skin_points*::
 
-            total = (2*n_sp - 1)*(n_ribs + n_ribs-1)  [grids + skin panels]
-                  + fixed overhead                      [curves, rib surfs,
-                                                         spar/stringer lines,
+            total = (2*n_sp - 2)*(n_ribs + n_ribs-1)  [grids + skin panels]
+                  + fixed overhead                      [rib surfs,
+                                                         stringer lines,
                                                          spar panels]
 
-        This method solves for ``n_sp`` analytically.
+        This method solves for ``n_sp`` analytically.  The count matches
+        :meth:`summary` for solid ribs without inner cuts.  Cavity grids of
+        hollow ribs are not included, and ``min_point_spacing`` filtering
+        can only lower the final count.
 
         Parameters
         ----------
@@ -531,20 +549,19 @@ class Wing:
         # Fixed overhead (independent of n_skin_points)
         fixed = (
             (n_spars + 1) * R               # rib trimmed surfaces (curves are aux.)
-            + 2 * n_spars * P                # spar lines
-            + 2 * n_stringers * P            # stringer lines
+            + 2 * n_stringers * P            # stringer lines (upper + lower)
             + n_spars * P                    # spar panel surfaces
         )
 
-        # n_sp-dependent coefficient: total_variable = (2*n_sp - 1) * coeff
+        # n_sp-dependent coefficient: total_variable = (2*n_sp - 2) * coeff
         coeff = R + P  # grids contribute R, skin panels contribute P
 
         budget = max_entities - fixed
         if budget <= 0:
             return min_skin_points
 
-        # (2*n_sp - 1) <= budget / coeff  =>  n_sp <= (budget/coeff + 1) / 2
-        n_sp = int((budget / coeff + 1) / 2)
+        # (2*n_sp - 2) <= budget / coeff  =>  n_sp <= budget / (2*coeff) + 1
+        n_sp = int(budget / (2 * coeff) + 1)
         return max(n_sp, min_skin_points)
 
     @staticmethod
@@ -694,35 +711,49 @@ class Wing:
         return fig
 
     def summary(self) -> EntitySummary:
-        """Count all Nastran/Patran entities that would be generated."""
+        """Count the Patran entities that :func:`save_ses` writes for this wing.
+
+        Counts are taken from the built ribs, so hollow sections, inner cuts
+        and the ``min_point_spacing`` filter are all reflected.
+        """
         n = self.n_ribs
-        n_sp = self.n_skin_points
         n_spars = len(self.spar_positions)
         n_stringers = len(self.stringer_positions)
         pairs = n - 1  # consecutive-rib pairs
 
-        # Per rib: 2*n_sp - 1 grid points, n_spars+1 curves & trimmed surfaces
-        grids_per_rib = 2 * n_sp - 1
-        curves_per_rib = n_spars + 1
-        surfaces_per_rib = n_spars + 1
+        grid_points = inner_grid_points = rib_curves = rib_surfaces = 0
+        for rib in self.ribs:
+            # Unique outer profile points (the closing LE duplicate is skipped)
+            grid_points += len(rib.profile[0]) - 1
 
-        # Between consecutive ribs
-        structural_pts = (n_spars + n_stringers) * 2  # spar+stringer ids per rib
-        spar_lines_per_pair = n_spars * 2
-        stringer_lines_per_pair = n_stringers * 2
-        spar_panels_per_pair = n_spars
-        skin_panels_per_pair = 2 * n_sp - 1
+            if rib.cut_sections is not None:
+                n_regions = sum(len(subs) for subs in rib.cut_sections.values())
+                inner = rib.cut_inner_profiles or []
+            else:
+                n_regions = n_spars + 1
+                inner = rib.inner_profiles or []
+            inner = [p for p in inner if p is not None]
+
+            # One trimmed surface per region, bounded by one outer PWL call
+            # plus one inner PWL call per cavity.
+            rib_surfaces += n_regions
+            rib_curves += n_regions + len(inner)
+            inner_grid_points += sum(len(p[0]) - 1 for p in inner)
+
+        # Skin panels: one per unique profile segment of the closed contour
+        n_unique = len(self.ribs[0].profile[0]) - 1
 
         return EntitySummary(
             n_ribs=n,
             n_spars=n_spars,
             n_stringers=n_stringers,
-            n_skin_points=n_sp,
-            grid_points=grids_per_rib * n,
-            rib_curves=curves_per_rib * n,
-            rib_surfaces=surfaces_per_rib * n,
-            spar_lines=spar_lines_per_pair * pairs,
-            stringer_lines=stringer_lines_per_pair * pairs,
-            spar_panel_surfaces=spar_panels_per_pair * pairs,
-            skin_panel_surfaces=skin_panels_per_pair * pairs,
+            n_skin_points=self.n_skin_points,
+            grid_points=grid_points,
+            rib_curves=rib_curves,
+            rib_surfaces=rib_surfaces,
+            spar_lines=0,  # spar webs are exported as panels, not lines
+            stringer_lines=2 * n_stringers * pairs,  # upper + lower per bay
+            spar_panel_surfaces=n_spars * pairs,
+            skin_panel_surfaces=n_unique * pairs,
+            inner_grid_points=inner_grid_points,
         )
