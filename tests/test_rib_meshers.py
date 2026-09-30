@@ -11,7 +11,11 @@ from perfilador.mesh import (
 )
 from perfilador.mesh.topology import rib_points
 
-MESHERS = sorted(RIB_MESHERS)
+try:
+    import gmsh  # noqa: F401
+    MESHERS = sorted(RIB_MESHERS)
+except ImportError:  # gmsh is optional
+    MESHERS = sorted(set(RIB_MESHERS) - {"gmsh"})
 _WINGS = {}
 
 

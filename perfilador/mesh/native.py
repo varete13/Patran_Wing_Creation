@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-from shapely.geometry import LinearRing, Point
+from shapely.geometry import LinearRing
 
 from . import RIB_MESHERS
 from .quality import element_metrics, free_edges
@@ -31,10 +31,13 @@ from .topology import (
     NodeKey,
     RibMesh,
     boundary_nodes,
+    inner_corner_params,
     patch_corners,
     rib_patches,
     rib_points,
+    ring_side,
     signed_area,
+    trailing_edge_cap,
 )
 
 if TYPE_CHECKING:
@@ -103,15 +106,6 @@ def _fill(mesh: RibMesh, X: np.ndarray, bottom, right, top, left) -> None:
     _grid_elements(mesh, K)
 
 
-def _side(keys: list, a: int, b: int) -> list[int]:
-    """Boundary positions from *a* to *b* (inclusive), going forward."""
-    n = len(keys)
-    out = [a]
-    while out[-1] != b:
-        out.append((out[-1] + 1) % n)
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Solid patches
 # ---------------------------------------------------------------------------
@@ -151,15 +145,15 @@ def _grid_score(X: np.ndarray) -> tuple[int, float]:
 def _mapped_sides(keys, c: list[int]):
     """Boundary positions of the four sides for corners ``c0..c3`` (CCW)."""
     c0, c1, c2, c3 = c
-    return (_side(keys, c0, c1), _side(keys, c1, c2),
-            _side(keys, c2, c3)[::-1], _side(keys, c3, c0)[::-1])
+    return (ring_side(keys, c0, c1), ring_side(keys, c1, c2),
+            ring_side(keys, c2, c3)[::-1], ring_side(keys, c3, c0)[::-1])
 
 
 def _apex_sides(keys, apex: int, c_next: int, c_prev: int):
     """Sides of a grid collapsed onto *apex* (base = c_next → c_prev)."""
-    base = _side(keys, c_next, c_prev)
-    return (_side(keys, apex, c_next), base,
-            _side(keys, c_prev, apex)[::-1], [apex] * len(base))
+    base = ring_side(keys, c_next, c_prev)
+    return (ring_side(keys, apex, c_next), base,
+            ring_side(keys, c_prev, apex)[::-1], [apex] * len(base))
 
 
 class _Candidate:
@@ -268,14 +262,7 @@ def _mesh_ogrid(mesh: RibMesh, keys, xy, corners: list[int], cavity: np.ndarray,
                 n_wall: int) -> None:
     xy = np.asarray(xy)
     ring = LinearRing(cavity)
-    # Inner corners: projection of the outer corners, kept in cyclic order
-    d = [ring.project(Point(*xy[c])) for c in corners]
-    order = np.argsort(d)
-    start = list(order).index(0)
-    order = list(order[start:]) + list(order[:start])
-    if order != sorted(order):  # projections not monotonic → spread evenly
-        L = ring.length
-        d = [(d[0] + L * k / len(corners)) % L for k in range(len(corners))]
+    d = inner_corner_params(cavity, xy, corners)
     radial: dict[int, list[NodeKey]] = {}
     for c, dc in zip(corners, d):
         pin = np.array(ring.interpolate(dc).coords[0])
@@ -287,7 +274,7 @@ def _mesh_ogrid(mesh: RibMesh, keys, xy, corners: list[int], cavity: np.ndarray,
     m = len(corners)
     for k in range(m):
         a, b = corners[k], corners[(k + 1) % m]
-        outer = _side(keys, a, b)
+        outer = ring_side(keys, a, b)
         pts_in = _resample_like(ring, d[k], d[(k + 1) % m], xy[outer])
         inner_keys = [radial[a][-1]] + [mesh.add_node(p) for p in pts_in[1:-1]] \
             + [radial[b][-1]]
@@ -297,58 +284,23 @@ def _mesh_ogrid(mesh: RibMesh, keys, xy, corners: list[int], cavity: np.ndarray,
         _fill(mesh, X, [keys[p] for p in outer], radial[b], inner_keys, radial[a])
 
 
-def _split_tail(patch_keys, xy, P, n_sp, cavity, h):
-    """Find where to cut the trailing-edge wedge behind *cavity*.
-
-    The cap joins the first upper / lower station pair behind the cavity
-    tip.  Returns ``(pos_upper, pos_lower, pos_te, cap_points)`` (boundary
-    positions and the interior cap points) or ``None`` when the patch does
-    not contain the trailing edge.
-    """
-    te = ("p", n_sp - 1)
-    if te not in patch_keys:
-        return None
-    chord = P[n_sp - 1] - P[0]
-    chord = chord / np.linalg.norm(chord)
-    t_cav = float(np.max((cavity - P[0]) @ chord))
-    # first station (upper index j, lower 2n_sp-2-j) behind the cavity tip
-    best = None
-    for j in range(n_sp - 2, 0, -1):
-        ku, kl = ("p", j), ("p", 2 * n_sp - 2 - j)
-        if ku in patch_keys and kl in patch_keys and (P[j] - P[0]) @ chord > t_cav:
-            best = (ku, kl)
-    if best is None:
-        return None
-    ku, kl = best
-    pu, pl, pt = patch_keys.index(ku), patch_keys.index(kl), patch_keys.index(te)
-    N = len(patch_keys)
-    if (pt - pl) % N < (pu - pl) % N:   # CCW ring: lower → TE → upper
-        pu, pl = pl, pu
-    if not ((pt - pu) % N < (pl - pu) % N):
-        return None
-    cap_len = np.linalg.norm(xy[pl] - xy[pu])
-    nc = max(2, int(round(cap_len / h)))
-    cap_mid = [(1 - s / nc) * xy[pu] + (s / nc) * xy[pl] for s in range(1, nc)]
-    return pu, pl, pt, cap_mid
-
-
 def _mesh_hollow(mesh, keys, xy, corners, cavity, P, n_sp, n_wall) -> str:
     xy = np.asarray(xy)
     seg = np.hypot(*np.diff(np.vstack([xy, xy[:1]]), axis=0).T)
-    tail = _split_tail(keys, xy, P, n_sp, cavity, float(np.median(seg)))
+    tail = trailing_edge_cap(keys, xy, P, n_sp, cavity, float(np.median(seg)))
     if tail is None:
         _mesh_ogrid(mesh, keys, xy, corners, cavity, n_wall)
         return "o-grid"
     pu, pl, pt, cap_mid = tail
     cap_keys = [mesh.add_node(p) for p in cap_mid]
     # tail: pu → … → te → … → pl, then the cap back to pu
-    tail_pos = _side(keys, pu, pl)
+    tail_pos = ring_side(keys, pu, pl)
     t_keys = [keys[p] for p in tail_pos] + cap_keys[::-1]
     t_xy = np.vstack([xy[tail_pos], np.array(cap_mid[::-1]).reshape(-1, 2)])
     t_c = [0, tail_pos.index(pt), len(tail_pos) - 1]
     _mesh_solid(mesh, t_keys, t_xy, t_c)
     # main: pl → … → pu, then the cap from pu to pl
-    main_pos = _side(keys, pl, pu)
+    main_pos = ring_side(keys, pl, pu)
     m_keys = [keys[p] for p in main_pos] + cap_keys
     m_xy = np.vstack([xy[main_pos], np.array(cap_mid).reshape(-1, 2)])
     m_c = sorted({main_pos.index(c) for c in corners if c in main_pos and c != pt}

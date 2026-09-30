@@ -190,3 +190,109 @@ def patch_corners(patch: RibPatch, P: np.ndarray, n_sp: int) -> list[int]:
                            for q in c) if c else 0.0
             c.add(max(range(m), key=dist))
     return sorted(c)
+
+
+def ring_side(keys: list, a: int, b: int) -> list[int]:
+    """Boundary positions from *a* to *b* (inclusive), going forward."""
+    n = len(keys)
+    out = [a]
+    while out[-1] != b:
+        out.append((out[-1] + 1) % n)
+    return out
+
+
+def trailing_edge_cap(patch_keys, xy, P, n_sp, cavity, h):
+    """Find where to cut the trailing-edge wedge behind *cavity*.
+
+    The cap joins the first upper / lower station pair behind the cavity
+    tip (by at least ``h / 2``).  Returns ``(pos_upper, pos_lower, pos_te, cap_points)`` (boundary
+    positions and the interior cap points) or ``None`` when the patch does
+    not contain the trailing edge.
+    """
+    te = ("p", n_sp - 1)
+    if te not in patch_keys:
+        return None
+    chord = P[n_sp - 1] - P[0]
+    chord = chord / np.linalg.norm(chord)
+    t_cav = float(np.max((cavity - P[0]) @ chord))
+    # first station (upper index j, lower 2n_sp-2-j) at least half a skin
+    # segment behind the cavity tip, so the block around the tip is not flat
+    best = None
+    for j in range(n_sp - 2, 0, -1):
+        ku, kl = ("p", j), ("p", 2 * n_sp - 2 - j)
+        if (ku in patch_keys and kl in patch_keys
+                and (P[j] - P[0]) @ chord > t_cav + 0.5 * h):
+            best = (ku, kl)
+    if best is None:
+        return None
+    ku, kl = best
+    pu, pl, pt = patch_keys.index(ku), patch_keys.index(kl), patch_keys.index(te)
+    N = len(patch_keys)
+    if (pt - pl) % N < (pu - pl) % N:   # CCW ring: lower → TE → upper
+        pu, pl = pl, pu
+    if not ((pt - pu) % N < (pl - pu) % N):
+        return None
+    cap_len = np.linalg.norm(xy[pl] - xy[pu])
+    nc = max(2, int(round(cap_len / h)))
+    cap_mid = [(1 - s / nc) * xy[pu] + (s / nc) * xy[pl] for s in range(1, nc)]
+    return pu, pl, pt, cap_mid
+
+
+def inner_corner_params(cavity: np.ndarray, xy: np.ndarray,
+                        corners: list[int]) -> list[float]:
+    """Arc-length positions on the *cavity* ring matching outer *corners*.
+
+    Each outer corner is first projected onto the nearest cavity point; if
+    those points are not in the same cyclic order as the corners, the corners
+    are pushed inwards along their angle bisectors instead; if neither is
+    ordered, the positions are spread evenly so the O-grid blocks never
+    cross.  Coincident positions are separated by 2 % of the cavity length.
+    """
+    from shapely.geometry import LineString, LinearRing, Point
+
+    ring = LinearRing(cavity)
+    L = ring.length
+    n = len(xy)
+    reach = 4.0 * float(np.ptp(np.vstack([xy, cavity]), axis=0).max())
+
+    def bisector_hit(c):
+        p = xy[c]
+        a = xy[c - 1] - p
+        b = xy[(c + 1) % n] - p
+        a, b = a / np.linalg.norm(a), b / np.linalg.norm(b)
+        t = b - a
+        normal = np.array([-t[1], t[0]]) / max(np.linalg.norm(t), 1e-14)
+        bis = a + b
+        v = bis / np.linalg.norm(bis) if np.linalg.norm(bis) > 0.3 else normal
+        if v @ normal < 0:
+            v = -v
+        hit = LineString([p, p + reach * v]).intersection(ring)
+        pts = [np.asarray(g.coords[0]) for g in getattr(hit, "geoms", [hit])
+               if not g.is_empty]
+        if not pts:
+            return ring.project(Point(*p))
+        return ring.project(Point(*min(pts, key=lambda s: np.linalg.norm(s - p))))
+
+    def ordered(d):
+        """*d* made strictly increasing (cyclically, gaps >= 2 % of L) by
+        separating ties, or ``None`` if the corners are out of order."""
+        eps = 0.02 * L
+        u = [d[0]]
+        for x in d[1:]:
+            r = (x - d[0]) % L               # unwrap relative to the first
+            x = d[0] + (r if r > 1e-9 else L)  # a tie with d[0] sits at +L
+            if x < u[-1] - 1e-9 and u[-1] - x > eps:   # went backwards
+                return None
+            u.append(max(x, u[-1] + eps))
+        if u[-1] > d[0] + L - eps:          # tie across the wrap
+            u[-1] = d[0] + L - eps
+            if len(u) > 1 and u[-1] < u[-2] + eps:
+                return None
+        return [x % L for x in u]
+
+    for d in ([ring.project(Point(*xy[c])) for c in corners],
+              [bisector_hit(c) for c in corners]):
+        fixed = ordered(d)
+        if fixed is not None:
+            return fixed
+    return [(d[0] + L * k / len(corners)) % L for k in range(len(corners))]

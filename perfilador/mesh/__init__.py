@@ -31,7 +31,7 @@ def mesh_rib_face(rib: Rib, method: str, n_web: int = 4, n_wall: int = 2) -> Rib
 
 
 # Register the meshers (each module adds itself to RIB_MESHERS)
-from . import native  # noqa: E402,F401
+from . import gmsh_mesher, native  # noqa: E402,F401
 
 
 __all__ = [

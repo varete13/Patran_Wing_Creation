@@ -575,8 +575,8 @@ def save_bdf(
         elements.  ``1`` (default) gives a single element per bay.
         Values > 1 insert ``n_span_div - 1`` intermediate profile-node rows.
     rib_mesher : str
-        Rib-face mesher: ``"native"`` (default, structured, pure Python)
-        or ``"legacy"`` (the original
+        Rib-face mesher: ``"native"`` (default, structured, pure Python),
+        ``"gmsh"`` (needs the ``gmsh`` package) or ``"legacy"`` (the original
         concentric-ring mesh, which ignores ``inner_cuts``).  For the
         structured meshers *n_rib_layers* is the number of element layers
         across each cavity wall.
