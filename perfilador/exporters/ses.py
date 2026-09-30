@@ -1,7 +1,10 @@
 """Patran SES session-file exporter.
 
 Generates session commands for grids, curves, trimmed surfaces, spar panels,
-stringer segments and skin quad panels.
+stringer segments and skin quad panels.  With ``mesh=True`` it also appends
+the commands that let Patran mesh the model itself (option C): Paver on the
+rib faces (including cuts and cavities), IsoMesh on spar and skin panels,
+Bar2 on stringers and a final node equivalence.
 """
 from __future__ import annotations
 
@@ -262,8 +265,104 @@ def _rib_geometry_commands(
     return cmds, surface_counter
 
 
-def save_ses(wing: Wing, filename: str | None = None) -> None:
-    """Write a complete Patran SES session file for *wing*."""
+def _id_list(ids: list[int]) -> str:
+    """Compact Patran id list: ``[1, 2, 3, 7]`` → ``"1:3 7"``."""
+    ids = sorted(set(int(i) for i in ids))
+    out: list[str] = []
+    start = prev = ids[0]
+    for i in ids[1:]:
+        if i == prev + 1:
+            prev = i
+            continue
+        out.append(f"{start}" if start == prev else f"{start}:{prev}")
+        start = prev = i
+    out.append(f"{start}" if start == prev else f"{start}:{prev}")
+    return " ".join(out)
+
+
+def default_mesh_size(wing: Wing) -> float:
+    """Median outer-profile segment length over all ribs (m)."""
+    import numpy as np
+
+    seg = []
+    for rib in wing.ribs:
+        px, py = rib.profile
+        seg.extend(np.hypot(np.diff(px), np.diff(py)))
+    return float(np.median(seg))
+
+
+def _mesh_commands(
+    rib_surfaces: list[int],
+    spar_surfaces: list[int],
+    skin_surfaces: list[int],
+    stringer_lines: list[int],
+    size: float,
+    equivalence_tol: float,
+) -> list[str]:
+    """Patran commands that mesh the geometry written by :func:`save_ses`.
+
+    One global edge length is used everywhere on purpose: Patran seeds an
+    edge with ``round(length / size)`` elements, so an edge shared by a rib
+    face and a skin or spar panel (same length) gets the same nodes on both
+    sides, and the final equivalence joins them into one conforming mesh.
+    """
+    L = f"{size:.6g}"
+    cmds = [
+        "# ---- Option C: Patran meshing ----\n",
+        "STRING fem_create_mesh_s_nodes_created[VIRTUAL]\n",
+        "STRING fem_create_mesh_s_elems_created[VIRTUAL]\n",
+        "STRING fem_create_mesh_c_nodes_created[VIRTUAL]\n",
+        "STRING fem_create_mesh_c_elems_created[VIRTUAL]\n",
+    ]
+
+    def surf(mesher: str, ids: list[int]) -> None:
+        if ids:
+            cmds.append(
+                f'fem_create_mesh_surf_4( "{mesher}", 49152, '
+                f'"Surface {_id_list(ids)}", 1, ["{L}"], "Quad4", "#", "#", '
+                f'"Coord 0", "Coord 0", fem_create_mesh_s_nodes_created, '
+                f"fem_create_mesh_s_elems_created )\n"
+            )
+
+    surf("Paver", rib_surfaces)       # trimmed faces with cuts / cavities
+    surf("IsoMesh", spar_surfaces)    # 4-sided panels → structured
+    surf("IsoMesh", skin_surfaces)
+    if stringer_lines:
+        cmds.append(
+            f'fem_create_mesh_curv_1( "Line {_id_list(stringer_lines)}", '
+            f'16384, {L}, "Bar2", "#", "#", "Coord 0", "Coord 0", '
+            f"fem_create_mesh_c_nodes_created, fem_create_mesh_c_elems_created )\n"
+        )
+    cmds += [
+        "REAL fem_equiv_all_x_equivtol_ab\n",
+        "INTEGER fem_equiv_all_x_segment\n",
+        f'fem_equiv_all_group4( [" "], 0, "", 1, 1, {equivalence_tol:.6g}, '
+        f"FALSE, fem_equiv_all_x_equivtol_ab, fem_equiv_all_x_segment )\n",
+    ]
+    return cmds
+
+
+def save_ses(
+    wing: Wing,
+    filename: str | None = None,
+    mesh: bool = False,
+    mesh_size: float | None = None,
+    equivalence_tol: float = 0.005,
+) -> None:
+    """Write a complete Patran SES session file for *wing*.
+
+    Parameters
+    ----------
+    mesh : bool
+        Also write the Patran meshing commands (Paver rib faces, IsoMesh
+        spar / skin panels, Bar2 stringers, node equivalence).  Default
+        ``False`` (geometry only, as before).
+    mesh_size : float or None
+        Global element edge length (m).  Defaults to
+        :func:`default_mesh_size` (median skin segment).
+    equivalence_tol : float
+        Node equivalence tolerance (m); Patran's default resolution.
+    """
     if filename is None:
         filename = (
             f"Wing_{wing.span:.0f}m_{wing.n_ribs:.0f}_s_"
@@ -285,11 +384,17 @@ def save_ses(wing: Wing, filename: str | None = None) -> None:
 
         # --- Per-rib geometry (grids, curves, trimmed surfaces) ---
         surface_counter = 0
+        rib_surfaces: list[int] = []
+        spar_surfaces: list[int] = []
+        skin_surfaces: list[int] = []
+        stringer_lines: list[int] = []
         for rib in wing.ribs:
             # Initialise the surface counter for this rib exactly as the
             # original: base + stride * rib_index
             surface_counter = rib.ids.surface_base
+            first = surface_counter + 1
             cmds, surface_counter = _rib_geometry_commands(rib, surface_counter)
+            rib_surfaces.extend(range(first, surface_counter + 1))
             for line in cmds:
                 f.write(line)
 
@@ -301,6 +406,7 @@ def save_ses(wing: Wing, filename: str | None = None) -> None:
 
             for prev_pt, next_pt in zip(ids_prev, ids_next):
                 id_line = prev_pt - s.point_base + s.line_base
+                stringer_lines.append(id_line)
                 f.write(
                     f'asm_const_line_2point( "{id_line:.0f}", '
                     f'"Point {prev_pt}", "Point {next_pt}",'
@@ -320,6 +426,7 @@ def save_ses(wing: Wing, filename: str | None = None) -> None:
                     + prev_rib.ids.rib_index * s.surface_spar_stride
                     + n - 1
                 )
+                spar_surfaces.append(id_surf)
                 p1 = prev_rib.spar_ids[n - 1]
                 p2 = next_rib.spar_ids[n - 1]
                 p3 = next_rib.spar_ids[-n]
@@ -353,6 +460,7 @@ def save_ses(wing: Wing, filename: str | None = None) -> None:
                     + prev_rib.ids.rib_index * s.surface_skin_stride
                     + n
                 )
+                skin_surfaces.append(surf_id)
                 f.write(
                     f'sgm_const_surface_vertex("{surf_id:.0f}",'
                     f'"Point {p1:.0f}","Point {p2:.0f}",'
@@ -363,3 +471,12 @@ def save_ses(wing: Wing, filename: str | None = None) -> None:
                     f'ga_group_entity_add( "{GROUP_SKINS}",'
                     f'"Surface {surf_id:.0f}")\n'
                 )
+
+        # --- Option C: let Patran mesh the model ---
+        if mesh:
+            size = mesh_size if mesh_size is not None else default_mesh_size(wing)
+            for line in _mesh_commands(
+                rib_surfaces, spar_surfaces, skin_surfaces, stringer_lines,
+                size, equivalence_tol,
+            ):
+                f.write(line)
