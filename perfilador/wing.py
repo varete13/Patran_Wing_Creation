@@ -108,6 +108,18 @@ class Wing:
         Minimum physical distance (m) between consecutive profile points.
         Points that would be closer than this at the smallest chord station
         are removed.  Set to ``None`` to disable.  Default ``0.005``.
+    inner_cuts : list or dict or None
+        Cut pairs, globally (``list``) or per rib index (``dict``).  Each pair
+        is either two **local profile indices** ``(int, int)`` — which depend
+        on *n_skin_points* — or two **chord fractions** ``(x_upper, x_lower)``
+        given as floats in [0, 1], resolved to the nearest upper / lower
+        profile nodes and therefore independent of the discretisation.
+    exact_stations : bool
+        When ``True`` the spar and stringer chord positions are inserted into
+        the chordwise stations, so they sit exactly where requested instead of
+        snapping to the nearest skin point.  Neighbouring stations closer than
+        *min_point_spacing* are dropped.  Default ``False`` (original
+        behaviour; it keeps existing index-based ``inner_cuts`` valid).
     """
 
     def __init__(
@@ -131,6 +143,7 @@ class Wing:
         wall_thickness_kind: Literal["linear", "quadratic", "cubic", "previous", "next"] = "linear",
         cut_wall_thickness_kind: Literal["linear", "quadratic", "cubic", "previous", "next"] = "linear",
         fea_properties: FEAProperties | None = None,
+        exact_stations: bool = False,
     ) -> None:
         if airfoil is None and airfoil_distribution is None:
             raise ValueError("Provide either 'airfoil' or 'airfoil_distribution'")
@@ -160,6 +173,7 @@ class Wing:
             "wall_thickness_kind":  wall_thickness_kind,
             "cut_wall_thickness_kind": cut_wall_thickness_kind,
             "fea_properties": fea_properties.to_dict() if fea_properties is not None else None,
+            "exact_stations": exact_stations,
         }
 
         self.fea_properties = fea_properties
@@ -236,6 +250,17 @@ class Wing:
             x_stations = self._filter_min_spacing(
                 x_stations, min_chord, min_point_spacing
             )
+        if exact_stations:
+            min_dx = (
+                min_point_spacing / min(float(self.chord_at(y))
+                                        for y in np.linspace(0, span, n_ribs))
+                if min_point_spacing is not None else 0.0
+            )
+            x_stations = self._insert_stations(
+                x_stations,
+                list(spar_positions) + list(np.asarray(stringer_positions)),
+                min_dx,
+            )
         self._x_stations = x_stations
         self.n_skin_points = len(x_stations)
 
@@ -247,10 +272,14 @@ class Wing:
         # Normalise inner_cuts to a per-rib dict of local index pairs
         if isinstance(inner_cuts, list):
             _ic: dict[int, list[tuple[int, int]]] | None = {
-                i: list(inner_cuts) for i in range(n_ribs)
+                i: [self._resolve_cut(p) for p in inner_cuts]
+                for i in range(n_ribs)
             }
         elif inner_cuts is not None:
-            _ic = inner_cuts
+            _ic = {
+                i: [self._resolve_cut(p) for p in pairs]
+                for i, pairs in inner_cuts.items()
+            }
         else:
             _ic = None
 
@@ -301,6 +330,39 @@ class Wing:
         if spacing == "uniform":
             return np.linspace(0, 1, n_points)
         raise ValueError(f"Unknown point_spacing {spacing!r}")
+
+    @staticmethod
+    def _insert_stations(
+        x_stations: np.ndarray, positions, min_dx: float = 0.0
+    ) -> np.ndarray:
+        """Insert *positions* into *x_stations*, dropping stations closer
+        than *min_dx* to an inserted one (the LE and TE are always kept)."""
+        pos = sorted({float(p) for p in positions if 0.0 < float(p) < 1.0})
+        xs = [
+            float(x) for x in x_stations
+            if x in (x_stations[0], x_stations[-1])
+            or all(abs(x - p) >= max(min_dx, 1e-12) for p in pos)
+        ]
+        return np.array(sorted(set(xs) | set(pos)))
+
+    def _resolve_cut(self, pair) -> tuple[int, int]:
+        """Convert a cut pair to local profile indices.
+
+        Integer pairs are returned unchanged.  Float pairs are chord fractions
+        ``(x_upper, x_lower)`` mapped to the nearest upper / lower station.
+        """
+        a, b = pair
+        if not (isinstance(a, float) or isinstance(b, float)):
+            return (int(a), int(b))
+        xs = self._x_stations
+        n = len(xs)
+        ju = int(np.argmin(np.abs(xs - float(a))))
+        jl = int(np.argmin(np.abs(xs - float(b))))
+        # Profile layout: upper[0..n-1] + lower reversed (TE excluded), so the
+        # lower-surface node of station j (0 < j < n-1) has index 2n-2-j and
+        # the LE lower node coincides with index 0.
+        il = 0 if jl == 0 else (n - 1 if jl == n - 1 else 2 * n - 2 - jl)
+        return (ju, il)
 
     @staticmethod
     def _filter_min_spacing(
@@ -370,6 +432,7 @@ class Wing:
             "wall_thickness_kind":     p["wall_thickness_kind"],
             "cut_wall_thickness_kind": p["cut_wall_thickness_kind"],
             "fea_properties":          p["fea_properties"],
+            "exact_stations":          p["exact_stations"],
         }
 
     @classmethod
@@ -421,6 +484,7 @@ class Wing:
             cut_wall_thickness_kind=d.get("cut_wall_thickness_kind", "linear"),
             fea_properties=FEAProperties.from_dict(d["fea_properties"])
                            if d.get("fea_properties") else None,
+            exact_stations=d.get("exact_stations", False),
         )
 
     def to_json(self, path) -> None:
